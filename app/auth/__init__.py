@@ -3,21 +3,41 @@ Authentication Package
 Handles user authentication, JWT tokens, and authorization.
 """
 
+from app.auth.dependencies import CurrentUser, get_current_user
+from app.auth.schemas import (
+    LoginRequest,
+    RefreshRequest,
+    SignupRequest,
+    TokenResponse,
+    UserResponse,
+    UserWithOrgResponse,
+)
+from app.auth.service import AuthService
 from app.auth.utils import (
-    hash_password,
-    verify_password,
     create_access_token,
     create_refresh_token,
     decode_token,
+    hash_password,
+    verify_password,
 )
-from app.auth.dependencies import get_current_user
 
 __all__ = [
-    "hash_password",
-    "verify_password",
+    # Dependencies
+    "CurrentUser",
+    "get_current_user",
+    # Schemas
+    "LoginRequest",
+    "RefreshRequest",
+    "SignupRequest",
+    "TokenResponse",
+    "UserResponse",
+    "UserWithOrgResponse",
+    # Service
+    "AuthService",
+    # Utils
     "create_access_token",
     "create_refresh_token",
     "decode_token",
-    "get_current_user",
+    "hash_password",
+    "verify_password",
 ]
-

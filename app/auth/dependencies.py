@@ -10,10 +10,10 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.service import AuthService
 from app.auth.utils import decode_token
 from app.database import get_async_session
 from app.models import User
-from app.services.user_service import UserService
 
 # Security scheme for Swagger UI
 security = HTTPBearer()
@@ -47,16 +47,13 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     
-    # Decode token
     payload = decode_token(credentials.credentials)
     if not payload:
         raise credentials_exception
     
-    # Check token type
     if payload.get("type") != "access":
         raise credentials_exception
     
-    # Get user ID from token
     user_id_str = payload.get("sub")
     if not user_id_str:
         raise credentials_exception
@@ -66,9 +63,8 @@ async def get_current_user(
     except ValueError:
         raise credentials_exception
     
-    # Fetch user from database
-    user_service = UserService(session)
-    user = await user_service.get_by_id(user_id)
+    auth_service = AuthService(session)
+    user = await auth_service.get_user_by_id(user_id)
     
     if not user:
         raise credentials_exception
@@ -84,4 +80,3 @@ async def get_current_user(
 
 # Type alias for cleaner route signatures
 CurrentUser = Annotated[User, Depends(get_current_user)]
-

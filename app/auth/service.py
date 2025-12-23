@@ -1,5 +1,5 @@
 """
-User Service
+Authentication Service
 Handles user and organization CRUD operations.
 """
 
@@ -13,13 +13,13 @@ from app.auth.utils import hash_password, verify_password
 from app.models import User, Organization
 
 
-class UserService:
-    """Service for user-related database operations."""
+class AuthService:
+    """Service for user authentication and management."""
     
     def __init__(self, session: AsyncSession):
         self.session = session
     
-    async def get_by_id(self, user_id: UUID) -> User | None:
+    async def get_user_by_id(self, user_id: UUID) -> User | None:
         """
         Get user by ID.
         
@@ -37,7 +37,7 @@ class UserService:
         result = await self.session.execute(query)
         return result.scalar_one_or_none()
     
-    async def get_by_email(self, email: str) -> User | None:
+    async def get_user_by_email(self, email: str) -> User | None:
         """
         Get user by email address.
         
@@ -55,7 +55,7 @@ class UserService:
         result = await self.session.execute(query)
         return result.scalar_one_or_none()
     
-    async def create(self, email: str, password: str, organization_name: str) -> User:
+    async def create_user(self, email: str, password: str, organization_name: str) -> User:
         """
         Create a new user with organization.
         
@@ -67,7 +67,6 @@ class UserService:
         Returns:
             Created User instance
         """
-        # Create user
         user = User(
             email=email,
             password_hash=hash_password(password),
@@ -75,9 +74,8 @@ class UserService:
             is_verified=False,
         )
         self.session.add(user)
-        await self.session.flush()  # Get user ID
+        await self.session.flush()
         
-        # Create organization
         organization = Organization(
             name=organization_name,
             user_id=user.id,
@@ -85,7 +83,6 @@ class UserService:
         self.session.add(organization)
         await self.session.flush()
         
-        # Refresh to load relationships
         await self.session.refresh(user, ["organization"])
         
         return user
@@ -101,7 +98,7 @@ class UserService:
         Returns:
             User if credentials valid, None otherwise
         """
-        user = await self.get_by_email(email)
+        user = await self.get_user_by_email(email)
         
         if not user:
             return None

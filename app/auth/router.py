@@ -4,26 +4,26 @@ API endpoints for user authentication.
 """
 
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import CurrentUser
+from app.auth.schemas import (
+    SignupRequest,
+    LoginRequest,
+    RefreshRequest,
+    TokenResponse,
+    UserWithOrgResponse,
+)
+from app.auth.service import AuthService
 from app.auth.utils import (
     create_access_token,
     create_refresh_token,
     decode_token,
 )
 from app.database import get_async_session
-from app.schemas import (
-    SignupRequest,
-    LoginRequest,
-    RefreshRequest,
-    TokenResponse,
-    UserResponse,
-)
-from app.schemas.user import UserWithOrgResponse
-from app.services.user_service import UserService
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -47,23 +47,20 @@ async def signup(
     - Organization linked to user
     - JWT access and refresh tokens
     """
-    user_service = UserService(session)
+    auth_service = AuthService(session)
     
-    # Check if email already exists
-    if await user_service.email_exists(request.email):
+    if await auth_service.email_exists(request.email):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Email already registered",
         )
     
-    # Create user and organization
-    user = await user_service.create(
+    user = await auth_service.create_user(
         email=request.email,
         password=request.password,
         organization_name=request.organization_name,
     )
     
-    # Generate tokens
     access_token = create_access_token(subject=str(user.id))
     refresh_token = create_refresh_token(subject=str(user.id))
     
@@ -88,10 +85,9 @@ async def login(
     
     Validates email and password, returns JWT tokens if valid.
     """
-    user_service = UserService(session)
+    auth_service = AuthService(session)
     
-    # Authenticate user
-    user = await user_service.authenticate(
+    user = await auth_service.authenticate(
         email=request.email,
         password=request.password,
     )
@@ -102,7 +98,6 @@ async def login(
             detail="Invalid email or password",
         )
     
-    # Generate tokens
     access_token = create_access_token(subject=str(user.id))
     refresh_token = create_refresh_token(subject=str(user.id))
     
@@ -128,7 +123,6 @@ async def refresh(
     Validates refresh token and returns new access token.
     Also returns new refresh token (token rotation).
     """
-    # Decode refresh token
     payload = decode_token(request.refresh_token)
     
     if not payload:
@@ -137,14 +131,12 @@ async def refresh(
             detail="Invalid or expired refresh token",
         )
     
-    # Verify token type
     if payload.get("type") != "refresh":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token type",
         )
     
-    # Get user ID
     user_id_str = payload.get("sub")
     if not user_id_str:
         raise HTTPException(
@@ -152,10 +144,8 @@ async def refresh(
             detail="Invalid token payload",
         )
     
-    # Verify user still exists and is active
-    from uuid import UUID
-    user_service = UserService(session)
-    user = await user_service.get_by_id(UUID(user_id_str))
+    auth_service = AuthService(session)
+    user = await auth_service.get_user_by_id(UUID(user_id_str))
     
     if not user or not user.is_active:
         raise HTTPException(
@@ -163,7 +153,6 @@ async def refresh(
             detail="User not found or inactive",
         )
     
-    # Generate new tokens
     access_token = create_access_token(subject=str(user.id))
     refresh_token = create_refresh_token(subject=str(user.id))
     
@@ -194,4 +183,3 @@ async def get_me(current_user: CurrentUser) -> UserWithOrgResponse:
         organization_id=current_user.organization.id if current_user.organization else None,
         organization_name=current_user.organization.name if current_user.organization else None,
     )
-
