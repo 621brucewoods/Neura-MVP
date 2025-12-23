@@ -10,6 +10,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.auth.router import router as auth_router
 from app.config import settings
 from app.database import close_db
 
@@ -89,8 +90,10 @@ def register_routers(app: FastAPI) -> None:
             "docs": "/docs" if settings.debug else "Disabled in production",
         }
     
-    # Future routers will be added here:
-    # app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
+    # Authentication
+    app.include_router(auth_router)
+    
+    # Future routers:
     # app.include_router(xero_router, prefix="/integrations/xero", tags=["Xero Integration"])
     # app.include_router(dashboard_router, prefix="/api/dashboard", tags=["Dashboard"])
 
