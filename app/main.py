@@ -1,0 +1,106 @@
+"""
+Cash Flow Intelligence MVP
+FastAPI Application Entry Point
+"""
+
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.config import settings
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator:
+    """
+    Application lifespan handler.
+    Runs startup and shutdown logic.
+    """
+    # Startup
+    print(f"🚀 Starting {settings.app_name} v{settings.app_version}")
+    print(f"📍 Environment: {settings.environment}")
+    print(f"🔧 Debug mode: {settings.debug}")
+    
+    yield
+    
+    # Shutdown
+    print(f"👋 Shutting down {settings.app_name}")
+
+
+def create_application() -> FastAPI:
+    """
+    Application factory.
+    Creates and configures the FastAPI application.
+    """
+    app = FastAPI(
+        title=settings.app_name,
+        version=settings.app_version,
+        description="A Multi-Tenant SaaS Backend for Cash Flow Intelligence",
+        docs_url="/docs" if settings.debug else None,
+        redoc_url="/redoc" if settings.debug else None,
+        openapi_url="/openapi.json" if settings.debug else None,
+        lifespan=lifespan,
+    )
+    
+    # Configure CORS
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins_list,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    
+    # Register routers
+    register_routers(app)
+    
+    return app
+
+
+def register_routers(app: FastAPI) -> None:
+    """
+    Register all API routers.
+    Will be expanded as we add more endpoints.
+    """
+    # Health check endpoint (always available)
+    @app.get("/health", tags=["Health"])
+    async def health_check():
+        """Health check endpoint for monitoring."""
+        return {
+            "status": "healthy",
+            "app": settings.app_name,
+            "version": settings.app_version,
+            "environment": settings.environment
+        }
+    
+    @app.get("/", tags=["Root"])
+    async def root():
+        """Root endpoint with API information."""
+        return {
+            "message": f"Welcome to {settings.app_name} API",
+            "version": settings.app_version,
+            "docs": "/docs" if settings.debug else "Disabled in production",
+        }
+    
+    # Future routers will be added here:
+    # app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
+    # app.include_router(xero_router, prefix="/integrations/xero", tags=["Xero Integration"])
+    # app.include_router(dashboard_router, prefix="/api/dashboard", tags=["Dashboard"])
+
+
+# Create the application instance
+app = create_application()
+
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    uvicorn.run(
+        "app.main:app",
+        host=settings.host,
+        port=settings.port,
+        reload=settings.debug,
+    )
+
