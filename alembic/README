@@ -1,0 +1,47 @@
+Database Migrations
+===================
+
+This directory contains Alembic database migrations for Cash Flow Intelligence MVP.
+
+Commands
+--------
+
+# Create a new migration (auto-detect changes)
+alembic revision --autogenerate -m "description of changes"
+
+# Apply all pending migrations
+alembic upgrade head
+
+# Revert last migration
+alembic downgrade -1
+
+# Revert all migrations
+alembic downgrade base
+
+# Show current revision
+alembic current
+
+# Show migration history
+alembic history
+
+# Show pending migrations
+alembic history -r current:head
+
+Best Practices
+--------------
+
+1. Always review auto-generated migrations before applying
+2. Test migrations on a copy of production data
+3. Keep migrations small and focused
+4. Never edit migrations that have been applied to production
+5. Use meaningful migration messages
+
+File Naming
+-----------
+
+Migrations are named with timestamp prefix:
+    YYYYMMDD_HHMM_revision_slug.py
+
+Example:
+    20251222_1430_abc123_add_users_table.py
+

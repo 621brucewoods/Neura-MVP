@@ -6,27 +6,32 @@ FastAPI Application Entry Point
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.database import close_db
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     """
     Application lifespan handler.
-    Runs startup and shutdown logic.
+    Manages startup and shutdown of application resources.
     """
     # Startup
     print(f"🚀 Starting {settings.app_name} v{settings.app_version}")
     print(f"📍 Environment: {settings.environment}")
     print(f"🔧 Debug mode: {settings.debug}")
+    print(f"🗄️  Database: Connected")
     
     yield
     
     # Shutdown
-    print(f"👋 Shutting down {settings.app_name}")
+    print("🗄️  Closing database connections...")
+    await close_db()
+    print(f"👋 {settings.app_name} shutdown complete")
 
 
 def create_application() -> FastAPI:
@@ -95,8 +100,6 @@ app = create_application()
 
 
 if __name__ == "__main__":
-    import uvicorn
-    
     uvicorn.run(
         "app.main:app",
         host=settings.host,
