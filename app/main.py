@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.auth.router import router as auth_router
 from app.config import settings
 from app.database import close_db
+from app.integrations.xero.router import router as xero_router
 
 
 @asynccontextmanager
@@ -93,8 +94,10 @@ def register_routers(app: FastAPI) -> None:
     # Authentication
     app.include_router(auth_router)
     
+    # Integrations
+    app.include_router(xero_router)
+    
     # Future routers:
-    # app.include_router(xero_router, prefix="/integrations/xero", tags=["Xero Integration"])
     # app.include_router(dashboard_router, prefix="/api/dashboard", tags=["Dashboard"])
 
 
