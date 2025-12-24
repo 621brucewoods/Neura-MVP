@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.auth.dependencies import get_current_user
 from app.database.connection import get_async_session
+from app.integrations.xero.cache_service import CacheService
 from app.integrations.xero.data_fetcher import XeroDataFetcher
 from app.integrations.xero.sdk_client import create_xero_sdk_client, XeroSDKClientError
 from app.models.user import User
@@ -26,17 +27,19 @@ router = APIRouter(prefix="/api/insights", tags=["Insights"])
     "/",
     response_model=InsightsResponse,
     summary="Get all financial insights",
-    description="Calculate and return all financial insights: cash runway, trends, and leading indicators.",
+    description="Calculate and return all financial insights: cash runway, trends, and leading indicators. Uses cache when available.",
 )
 async def get_insights(
     current_user: User = Depends(get_current_user),
     months: int = 6,
+    force_refresh: bool = False,
     db: AsyncSession = Depends(get_async_session),
 ) -> InsightsResponse:
     """
     Calculate and return all financial insights.
     
     This endpoint:
+    - Uses cached data when available (unless force_refresh=true)
     - Fetches financial data from Xero (or cache)
     - Calculates cash runway metrics
     - Analyzes cash flow trends
@@ -51,15 +54,26 @@ async def get_insights(
         )
     
     try:
+        # Create cache service
+        cache_service = CacheService(db)
+        
+        # Create SDK client (handles token validation and refresh)
         sdk_client = await create_xero_sdk_client(
             organization_id=current_user.organization.id,
             db=db,
         )
         
-        data_fetcher = XeroDataFetcher(sdk_client)
+        # Create data fetcher with SDK client and cache service
+        data_fetcher = XeroDataFetcher(sdk_client, cache_service=cache_service)
         
-        financial_data = await data_fetcher.fetch_all_data(months=months)
+        # Fetch all data (with caching)
+        financial_data = await data_fetcher.fetch_all_data(
+            organization_id=current_user.organization.id,
+            months=months,
+            force_refresh=force_refresh,
+        )
         
+        # Calculate insights from fetched data
         insights = InsightsService.calculate_all_insights(financial_data)
         
         return InsightsResponse(
