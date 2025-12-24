@@ -97,7 +97,28 @@ class XeroDataFetcher:
             report = report_response.reports[0] if hasattr(report_response, "reports") and report_response.reports else None
             
             balances_by_name = {}
+            closing_balance_index = None
+            
             if report and hasattr(report, "rows"):
+                header_row = None
+                
+                for row in report.rows:
+                    row_type_str = str(row.row_type) if hasattr(row, "row_type") else ""
+                    
+                    if "HEADER" in row_type_str.upper():
+                        header_row = row
+                        break
+                
+                if header_row and hasattr(header_row, "cells") and header_row.cells:
+                    for idx, cell in enumerate(header_row.cells):
+                        cell_value = cell.value if hasattr(cell, "value") else str(cell)
+                        if "Closing Balance" in cell_value or "closing" in cell_value.lower():
+                            closing_balance_index = idx
+                            break
+                
+                if closing_balance_index is None:
+                    logger.warning("Could not find 'Closing Balance' column in Bank Summary Report")
+                
                 for row in report.rows:
                     row_type_str = str(row.row_type) if hasattr(row, "row_type") else ""
                     
@@ -106,12 +127,15 @@ class XeroDataFetcher:
                             nested_row_type_str = str(nested_row.row_type) if hasattr(nested_row, "row_type") else ""
                             
                             if "ROW" in nested_row_type_str.upper() and "SUMMARY" not in nested_row_type_str.upper():
-                                if hasattr(nested_row, "cells") and nested_row.cells and len(nested_row.cells) >= 5:
-                                    account_name = nested_row.cells[0].value if hasattr(nested_row.cells[0], "value") else str(nested_row.cells[0])
-                                    balance_str = nested_row.cells[4].value if hasattr(nested_row.cells[4], "value") else str(nested_row.cells[4])
-                                    
-                                    balance = self._parse_decimal(balance_str)
-                                    balances_by_name[account_name] = balance
+                                if hasattr(nested_row, "cells") and nested_row.cells:
+                                    if closing_balance_index is not None and len(nested_row.cells) > closing_balance_index:
+                                        account_name = nested_row.cells[0].value if hasattr(nested_row.cells[0], "value") else str(nested_row.cells[0])
+                                        balance_str = nested_row.cells[closing_balance_index].value if hasattr(nested_row.cells[closing_balance_index], "value") else str(nested_row.cells[closing_balance_index])
+                                        
+                                        balance = self._parse_decimal(balance_str)
+                                        balances_by_name[account_name] = balance
+                                    elif closing_balance_index is None:
+                                        logger.warning("Skipping account row - Closing Balance column not found")
             
             accounts = []
             total_balance = Decimal("0.00")
@@ -477,16 +501,59 @@ class XeroDataFetcher:
         """
         Fetch Profit & Loss report.
         
+        Returns raw P&L data for AI analysis. Simple implementation
+        that returns the report structure without complex parsing.
+        
         Args:
             months: Number of months of history
             
         Returns:
-            P&L structure with periods and summary
+            P&L report structure (raw from Xero)
         """
-        return {
-            "periods": [],
-            "summary": {"total_revenue": 0.0, "total_expenses": 0.0, "net_income": 0.0},
-        }
+        try:
+            end_date = datetime.now(timezone.utc).date()
+            start_date = (end_date - timedelta(days=months * 31)).replace(day=1)
+            
+            response = self.api.get_report_profit_and_loss(
+                xero_tenant_id=self.tenant_id,
+                from_date=start_date,
+                to_date=end_date,
+            )
+            
+            if hasattr(response, "reports") and response.reports:
+                report = response.reports[0]
+                return {
+                    "report_id": report.report_id if hasattr(report, "report_id") else None,
+                    "report_name": report.report_name if hasattr(report, "report_name") else None,
+                    "report_date": report.report_date if hasattr(report, "report_date") else None,
+                    "raw_data": report.to_dict() if hasattr(report, "to_dict") else None,
+                }
+            
+            return {
+                "report_id": None,
+                "report_name": "Profit and Loss",
+                "report_date": None,
+                "raw_data": None,
+            }
+            
+        except ApiException as e:
+            logger.warning("SDK error fetching Profit & Loss report: %s", e)
+            return {
+                "report_id": None,
+                "report_name": "Profit and Loss",
+                "report_date": None,
+                "raw_data": None,
+                "error": str(e),
+            }
+        except Exception as e:
+            logger.warning("Error fetching Profit & Loss report: %s", e)
+            return {
+                "report_id": None,
+                "report_name": "Profit and Loss",
+                "report_date": None,
+                "raw_data": None,
+                "error": str(e),
+            }
     
     async def fetch_all_data(self, months: int = 3) -> dict[str, Any]:
         """
