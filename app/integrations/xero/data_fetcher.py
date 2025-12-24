@@ -1,10 +1,12 @@
 """
 Xero Data Fetcher
 Fetches financial data from Xero API using the official SDK.
+
+Primary data source: Executive Summary Report (accurate cash flow metrics).
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, date, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -34,12 +36,8 @@ class XeroDataFetcher:
     """
     Fetches financial data from Xero using the official SDK.
     
-    Provides clean, normalized data structures for cash runway calculations:
-    - Bank account balances (from Bank Summary Report + Accounts API)
-    - Bank transactions (cash flow history)
-    - Accounts Receivable invoices
-    - Accounts Payable invoices
-    - Profit & Loss (optional, graceful failure)
+    Primary focus: Executive Summary Report for accurate cash flow metrics.
+    Provides clean, normalized data structures for cash runway calculations.
     """
     
     def __init__(self, sdk_client: XeroSDKClient):
@@ -62,297 +60,166 @@ class XeroDataFetcher:
         except Exception:
             return Decimal(default)
     
-    async def fetch_bank_accounts(self) -> dict[str, Any]:
-        """
-        Fetch bank account balances.
-        
-        Uses Accounts API for metadata and Bank Summary Report for actual balances.
-        
-        Returns:
-            {
-                "accounts": [
-                    {"id": "...", "name": "...", "balance": 0.0, "currency": "..."}
-                ],
-                "total_balance": 0.0,
-                "currency": "NZD"
-            }
-        """
-        try:
-            accounts_response = self.api.get_accounts(
-                xero_tenant_id=self.tenant_id,
-                where='Status=="ACTIVE" AND Type=="BANK"',
-                order="Name ASC",
-            )
-            
-            accounts_list = accounts_response.accounts if hasattr(accounts_response, "accounts") else []
-            
-            if not accounts_list:
-                logger.warning("No active bank accounts found")
-                return {"accounts": [], "total_balance": 0.0, "currency": "NZD"}
-            
-            report_response = self.api.get_report_bank_summary(
-                xero_tenant_id=self.tenant_id,
-            )
-            
-            report = report_response.reports[0] if hasattr(report_response, "reports") and report_response.reports else None
-            
-            balances_by_name = {}
-            closing_balance_index = None
-            
-            if report and hasattr(report, "rows"):
-                header_row = None
-                
-                for row in report.rows:
-                    row_type_str = str(row.row_type) if hasattr(row, "row_type") else ""
-                    
-                    if "HEADER" in row_type_str.upper():
-                        header_row = row
-                        break
-                
-                if header_row and hasattr(header_row, "cells") and header_row.cells:
-                    for idx, cell in enumerate(header_row.cells):
-                        cell_value = cell.value if hasattr(cell, "value") else str(cell)
-                        if "Closing Balance" in cell_value or "closing" in cell_value.lower():
-                            closing_balance_index = idx
-                            break
-                
-                if closing_balance_index is None:
-                    logger.warning("Could not find 'Closing Balance' column in Bank Summary Report")
-                
-                for row in report.rows:
-                    row_type_str = str(row.row_type) if hasattr(row, "row_type") else ""
-                    
-                    if "SECTION" in row_type_str.upper() and hasattr(row, "rows") and row.rows:
-                        for nested_row in row.rows:
-                            nested_row_type_str = str(nested_row.row_type) if hasattr(nested_row, "row_type") else ""
-                            
-                            if "ROW" in nested_row_type_str.upper() and "SUMMARY" not in nested_row_type_str.upper():
-                                if hasattr(nested_row, "cells") and nested_row.cells:
-                                    if closing_balance_index is not None and len(nested_row.cells) > closing_balance_index:
-                                        account_name = nested_row.cells[0].value if hasattr(nested_row.cells[0], "value") else str(nested_row.cells[0])
-                                        balance_str = nested_row.cells[closing_balance_index].value if hasattr(nested_row.cells[closing_balance_index], "value") else str(nested_row.cells[closing_balance_index])
-                                        
-                                        balance = self._parse_decimal(balance_str)
-                                        balances_by_name[account_name] = balance
-                                    elif closing_balance_index is None:
-                                        logger.warning("Skipping account row - Closing Balance column not found")
-            
-            accounts = []
-            total_balance = Decimal("0.00")
-            currency = "NZD"
-            
-            for account in accounts_list:
-                account_name = str(account.name) if hasattr(account, "name") else "Unknown"
-                balance = balances_by_name.get(account_name, Decimal("0.00"))
-                
-                account_currency = currency
-                if hasattr(account, "currency_code") and account.currency_code:
-                    currency_code_obj = account.currency_code
-                    if hasattr(currency_code_obj, "value"):
-                        account_currency = currency_code_obj.value
-                    elif hasattr(currency_code_obj, "name"):
-                        account_currency = currency_code_obj.name
-                    else:
-                        account_currency = str(currency_code_obj).split(".")[-1] if "." in str(currency_code_obj) else str(currency_code_obj)
-                
-                if currency == "NZD" and account_currency:
-                    currency = account_currency
-                
-                account_id = str(account.account_id) if hasattr(account, "account_id") else None
-                
-                accounts.append({
-                    "id": account_id,
-                    "name": account_name,
-                    "balance": float(balance),
-                    "currency": account_currency or currency,
-                })
-                
-                total_balance += balance
-            
-            return {
-                "accounts": accounts,
-                "total_balance": float(total_balance),
-                "currency": currency,
-            }
-            
-        except ApiException as e:
-            logger.error("SDK error fetching bank accounts: %s", e)
-            raise XeroDataFetchError(
-                f"Failed to fetch bank accounts: {str(e)}",
-                status_code=e.status if hasattr(e, "status") else None,
-                endpoint="BankAccounts"
-            ) from e
-        except Exception as e:
-            logger.error("Error fetching bank accounts: %s", e, exc_info=True)
-            raise XeroDataFetchError(
-                f"Failed to fetch bank accounts: {str(e)}",
-                endpoint="BankAccounts"
-            ) from e
+    def _get_month_end_date(self, year: int, month: int) -> date:
+        """Get the last day of a given month."""
+        if month == 12:
+            return date(year, 12, 31)
+        else:
+            next_month = date(year, month + 1, 1)
+            return next_month - timedelta(days=1)
     
-    async def fetch_bank_transactions(self, months: int = 3) -> dict[str, Any]:
+    async def fetch_executive_summary(self, report_date: Optional[date] = None) -> dict[str, Any]:
         """
-        Fetch bank transactions for the last N months.
+        Fetch Executive Summary report for accurate cash flow metrics.
+        
+        This is the primary data source for cash runway calculations.
+        The report includes all cash flow sources (invoices, bills, bank feeds, etc.)
+        and excludes internal transfers automatically.
         
         Args:
-            months: Number of months of history
-            
+            report_date: Date for the report (defaults to today).
+                        Use month-end dates (e.g., 2025-12-31) for historical months.
+        
         Returns:
             {
-                "transactions": [...],
-                "monthly_summary": [
-                    {"month": "YYYY-MM", "inflow": 0.0, "outflow": 0.0, "net": 0.0, "count": 0}
-                ],
-                "total_transactions": 0
+                "cash_position": 0.0,      # Closing bank balance
+                "cash_spent": 0.0,         # Actual cash outflow (excludes internal transfers)
+                "cash_received": 0.0,      # Actual cash inflow
+                "operating_expenses": 0.0, # Total expenses from P&L
+                "report_date": "YYYY-MM-DD",
+                "raw_data": {...}          # Full report structure
             }
         """
         try:
-            end_date = datetime.now(timezone.utc)
-            start_date = end_date - timedelta(days=months * 31)
+            if report_date is None:
+                report_date = datetime.now(timezone.utc).date()
             
-            all_transactions = []
-            page = 1
+            response = self.api.get_report_executive_summary(
+                xero_tenant_id=self.tenant_id,
+                date=report_date,
+            )
             
-            while True:
-                where_clause = f'Date >= DateTime({start_date.year},{start_date.month},{start_date.day}) AND Status == "AUTHORISED"'
-                
-                response = self.api.get_bank_transactions(
-                    xero_tenant_id=self.tenant_id,
-                    where=where_clause,
-                    order="Date DESC",
-                    page=page,
-                )
-                
-                page_transactions = response.bank_transactions if hasattr(response, "bank_transactions") else []
-                
-                if not page_transactions:
-                    break
-                
-                all_transactions.extend(page_transactions)
-                
-                if len(page_transactions) < 100:
-                    break
-                
-                page += 1
-                if page > 10:
-                    logger.warning("Reached page limit for bank transactions")
-                    break
+            if not hasattr(response, "reports") or not response.reports:
+                logger.warning("No reports found in Executive Summary response")
+                return {
+                    "cash_position": 0.0,
+                    "cash_spent": 0.0,
+                    "cash_received": 0.0,
+                    "operating_expenses": 0.0,
+                    "report_date": report_date.isoformat(),
+                    "raw_data": None,
+                }
             
-            monthly_data: dict[str, dict] = {}
+            report = response.reports[0]
+            rows = report.rows if hasattr(report, "rows") else []
             
-            for transaction in all_transactions:
-                transaction_date = None
-                if hasattr(transaction, "date") and transaction.date:
-                    transaction_date = transaction.date
-                    if isinstance(transaction_date, datetime):
-                        pass
-                    elif hasattr(transaction_date, "date"):
-                        transaction_date = datetime.combine(transaction_date.date(), datetime.min.time()).replace(tzinfo=timezone.utc)
-                    else:
-                        try:
-                            transaction_date = datetime.fromisoformat(str(transaction_date).replace("Z", "+00:00"))
-                        except Exception:
-                            continue
-                
-                if not transaction_date:
+            cash_position = Decimal("0.00")
+            cash_spent = Decimal("0.00")
+            cash_received = Decimal("0.00")
+            operating_expenses = Decimal("0.00")
+            
+            for row in rows:
+                if not hasattr(row, "rows") or not row.rows:
                     continue
                 
-                month_key = transaction_date.strftime("%Y-%m")
+                row_title = row.title if hasattr(row, "title") else ""
                 
-                if month_key not in monthly_data:
-                    monthly_data[month_key] = {
-                        "month": month_key,
-                        "inflow": Decimal("0.00"),
-                        "outflow": Decimal("0.00"),
-                        "count": 0,
-                    }
+                if row_title == "Cash":
+                    for nested_row in row.rows:
+                        if not hasattr(nested_row, "cells") or not nested_row.cells or len(nested_row.cells) < 2:
+                            continue
+                        
+                        label = nested_row.cells[0].value if hasattr(nested_row.cells[0], "value") else str(nested_row.cells[0])
+                        value_str = nested_row.cells[1].value if hasattr(nested_row.cells[1], "value") else str(nested_row.cells[1])
+                        
+                        label_lower = label.lower() if isinstance(label, str) else ""
+                        
+                        if "closing bank balance" in label_lower:
+                            cash_position = self._parse_decimal(value_str)
+                        elif "cash spent" in label_lower:
+                            cash_spent = self._parse_decimal(value_str)
+                        elif "cash received" in label_lower:
+                            cash_received = self._parse_decimal(value_str)
                 
-                amount = self._parse_decimal(transaction.total if hasattr(transaction, "total") else 0)
-                transaction_type_str = ""
-                if hasattr(transaction, "type") and transaction.type:
-                    type_obj = transaction.type
-                    if hasattr(type_obj, "value"):
-                        transaction_type_str = type_obj.value
-                    elif hasattr(type_obj, "name"):
-                        transaction_type_str = type_obj.name
-                    else:
-                        transaction_type_str = str(type_obj).split(".")[-1] if "." in str(type_obj) else str(type_obj)
-                
-                if transaction_type_str == "RECEIVE":
-                    monthly_data[month_key]["inflow"] += amount
-                elif transaction_type_str == "SPEND":
-                    monthly_data[month_key]["outflow"] += amount
-                
-                monthly_data[month_key]["count"] += 1
-            
-            monthly_summary = []
-            for month_data in sorted(monthly_data.values(), key=lambda x: x["month"]):
-                monthly_summary.append({
-                    "month": month_data["month"],
-                    "inflow": float(month_data["inflow"]),
-                    "outflow": float(month_data["outflow"]),
-                    "net": float(month_data["inflow"] - month_data["outflow"]),
-                    "count": month_data["count"],
-                })
-            
-            transactions = []
-            for transaction in all_transactions[:50]:
-                transaction_type = None
-                if hasattr(transaction, "type") and transaction.type:
-                    type_obj = transaction.type
-                    if hasattr(type_obj, "value"):
-                        transaction_type = type_obj.value
-                    elif hasattr(type_obj, "name"):
-                        transaction_type = type_obj.name
-                    else:
-                        transaction_type = str(type_obj).split(".")[-1] if "." in str(type_obj) else str(type_obj)
-                
-                transaction_status = None
-                if hasattr(transaction, "status") and transaction.status:
-                    status_obj = transaction.status
-                    if hasattr(status_obj, "value"):
-                        transaction_status = status_obj.value
-                    elif hasattr(status_obj, "name"):
-                        transaction_status = status_obj.name
-                    else:
-                        transaction_status = str(status_obj).split(".")[-1] if "." in str(status_obj) else str(status_obj)
-                
-                reference = None
-                if hasattr(transaction, "reference") and transaction.reference:
-                    ref_str = str(transaction.reference).strip()
-                    reference = ref_str if ref_str and ref_str.lower() != "none" else None
-                
-                transactions.append({
-                    "id": str(transaction.bank_transaction_id) if hasattr(transaction, "bank_transaction_id") else None,
-                    "date": str(transaction.date) if hasattr(transaction, "date") else None,
-                    "type": transaction_type,
-                    "total": float(transaction.total) if hasattr(transaction, "total") else 0,
-                    "status": transaction_status,
-                    "reference": reference,
-                })
+                elif row_title == "Profitability":
+                    for nested_row in row.rows:
+                        if not hasattr(nested_row, "cells") or not nested_row.cells or len(nested_row.cells) < 2:
+                            continue
+                        
+                        label = nested_row.cells[0].value if hasattr(nested_row.cells[0], "value") else str(nested_row.cells[0])
+                        value_str = nested_row.cells[1].value if hasattr(nested_row.cells[1], "value") else str(nested_row.cells[1])
+                        
+                        label_lower = label.lower() if isinstance(label, str) else ""
+                        
+                        if label_lower == "expenses":
+                            operating_expenses = self._parse_decimal(value_str)
             
             return {
-                "transactions": transactions,
-                "monthly_summary": monthly_summary,
-                "total_transactions": len(all_transactions),
+                "cash_position": float(cash_position),
+                "cash_spent": float(cash_spent),
+                "cash_received": float(cash_received),
+                "operating_expenses": float(operating_expenses),
+                "report_date": report_date.isoformat(),
+                "raw_data": report.to_dict() if hasattr(report, "to_dict") else None,
             }
             
         except ApiException as e:
-            logger.error("SDK error fetching bank transactions: %s", e)
+            logger.error("SDK error fetching Executive Summary report: %s", e)
             raise XeroDataFetchError(
-                f"Failed to fetch bank transactions: {str(e)}",
+                f"Failed to fetch Executive Summary: {str(e)}",
                 status_code=e.status if hasattr(e, "status") else None,
-                endpoint="BankTransactions"
+                endpoint="ExecutiveSummary"
             ) from e
         except Exception as e:
-            logger.error("Error fetching bank transactions: %s", e, exc_info=True)
+            logger.error("Error fetching Executive Summary report: %s", e, exc_info=True)
             raise XeroDataFetchError(
-                f"Failed to fetch bank transactions: {str(e)}",
-                endpoint="BankTransactions"
+                f"Failed to fetch Executive Summary: {str(e)}",
+                endpoint="ExecutiveSummary"
             ) from e
+    
+    async def fetch_executive_summary_history(self, months: int = 6) -> list[dict[str, Any]]:
+        """
+        Fetch Executive Summary for multiple historical months.
+        
+        Useful for trend analysis and historical burn rate calculations.
+        
+        Args:
+            months: Number of historical months to fetch (default: 6)
+        
+        Returns:
+            List of Executive Summary data, one per month, ordered from oldest to newest.
+            Each item has the same structure as fetch_executive_summary().
+        """
+        history = []
+        today = datetime.now(timezone.utc).date()
+        
+        for i in range(months):
+            month_date = today.replace(day=1) - timedelta(days=1)
+            month_date = month_date.replace(day=1) - timedelta(days=i * 30)
+            month_end = self._get_month_end_date(month_date.year, month_date.month)
+            
+            try:
+                summary = await self.fetch_executive_summary(report_date=month_end)
+                history.append(summary)
+            except XeroDataFetchError as e:
+                logger.warning("Failed to fetch Executive Summary for %s: %s", month_end, e.message)
+                history.append({
+                    "cash_position": 0.0,
+                    "cash_spent": 0.0,
+                    "cash_received": 0.0,
+                    "operating_expenses": 0.0,
+                    "report_date": month_end.isoformat(),
+                    "raw_data": None,
+                    "error": e.message,
+                })
+        
+        return list(reversed(history))
     
     async def fetch_receivables(self) -> dict[str, Any]:
         """
         Fetch Accounts Receivable invoices.
+        
+        Used for leading indicators (receivables timing, overdue analysis).
         
         Returns:
             {
@@ -369,6 +236,8 @@ class XeroDataFetcher:
     async def fetch_payables(self) -> dict[str, Any]:
         """
         Fetch Accounts Payable invoices (bills).
+        
+        Used for leading indicators (payables timing, cash pressure signals).
         
         Returns:
             {
@@ -388,7 +257,7 @@ class XeroDataFetcher:
         
         Args:
             invoice_type: "ACCREC" for receivables, "ACCPAY" for payables
-            
+        
         Returns:
             Invoice summary with metrics
         """
@@ -397,7 +266,6 @@ class XeroDataFetcher:
             page = 1
             
             while True:
-                # Fetch via SDK
                 response = self.api.get_invoices(
                     xero_tenant_id=self.tenant_id,
                     where=f'Type=="{invoice_type}" AND Status=="AUTHORISED"',
@@ -501,12 +369,12 @@ class XeroDataFetcher:
         """
         Fetch Profit & Loss report.
         
-        Returns raw P&L data for AI analysis. Simple implementation
-        that returns the report structure without complex parsing.
+        Used for AI narrative (expense categories, revenue trends, profit analysis).
+        Returns raw P&L data for AI analysis.
         
         Args:
             months: Number of months of history
-            
+        
         Returns:
             P&L report structure (raw from Xero)
         """
@@ -555,47 +423,58 @@ class XeroDataFetcher:
                 "error": str(e),
             }
     
-    async def fetch_all_data(self, months: int = 3) -> dict[str, Any]:
+    async def fetch_all_data(self, months: int = 6) -> dict[str, Any]:
         """
         Fetch all financial data required for cash runway calculations.
         
+        Primary data source: Executive Summary Report (current + historical).
+        Additional data: Receivables, Payables, P&L for context and AI narrative.
+        
         Args:
-            months: Number of months of historical data
-            
+            months: Number of historical months to fetch (default: 6)
+        
         Returns:
             Complete financial data structure
         """
         try:
-            bank_accounts = None
-            bank_transactions = None
+            errors = []
+            
+            executive_summary_current = None
+            executive_summary_history = None
             receivables = None
             payables = None
             profit_loss = None
-            errors = []
             
             try:
-                bank_accounts = await self.fetch_bank_accounts()
+                executive_summary_current = await self.fetch_executive_summary()
             except XeroDataFetchError as e:
-                errors.append(f"Bank accounts: {e.message}")
-                bank_accounts = {"accounts": [], "total_balance": 0.0, "currency": "NZD"}
+                errors.append(f"Executive Summary (current): {e.message}")
+                executive_summary_current = {
+                    "cash_position": 0.0,
+                    "cash_spent": 0.0,
+                    "cash_received": 0.0,
+                    "operating_expenses": 0.0,
+                    "report_date": datetime.now(timezone.utc).date().isoformat(),
+                    "raw_data": None,
+                }
             
             try:
-                bank_transactions = await self.fetch_bank_transactions(months)
-            except XeroDataFetchError as e:
-                errors.append(f"Bank transactions: {e.message}")
-                bank_transactions = {"transactions": [], "monthly_summary": [], "total_transactions": 0}
+                executive_summary_history = await self.fetch_executive_summary_history(months=months)
+            except Exception as e:
+                errors.append(f"Executive Summary (history): {str(e)}")
+                executive_summary_history = []
             
             try:
                 receivables = await self.fetch_receivables()
             except XeroDataFetchError as e:
                 errors.append(f"Receivables: {e.message}")
                 receivables = {
-                    "total": 0.0, 
-                    "count": 0, 
-                    "overdue_amount": 0.0, 
-                    "overdue_count": 0, 
-                    "avg_days_overdue": 0.0, 
-                    "invoices": []
+                    "total": 0.0,
+                    "count": 0,
+                    "overdue_amount": 0.0,
+                    "overdue_count": 0,
+                    "avg_days_overdue": 0.0,
+                    "invoices": [],
                 }
             
             try:
@@ -603,25 +482,24 @@ class XeroDataFetcher:
             except XeroDataFetchError as e:
                 errors.append(f"Payables: {e.message}")
                 payables = {
-                    "total": 0.0, 
-                    "count": 0, 
-                    "overdue_amount": 0.0, 
-                    "overdue_count": 0, 
-                    "avg_days_overdue": 0.0, 
-                    "invoices": []
+                    "total": 0.0,
+                    "count": 0,
+                    "overdue_amount": 0.0,
+                    "overdue_count": 0,
+                    "avg_days_overdue": 0.0,
+                    "invoices": [],
                 }
             
-            profit_loss = await self.fetch_profit_loss(months)
+            profit_loss = await self.fetch_profit_loss(months=3)
             
             if errors:
                 logger.warning("Some data fetch operations failed: %s", ", ".join(errors))
             
-            # Commit any token updates from SDK refresh
             await self.client.commit_token_updates()
             
             return {
-                "bank_accounts": bank_accounts,
-                "bank_transactions": bank_transactions,
+                "executive_summary_current": executive_summary_current,
+                "executive_summary_history": executive_summary_history,
                 "invoices_receivable": receivables,
                 "invoices_payable": payables,
                 "profit_loss": profit_loss,

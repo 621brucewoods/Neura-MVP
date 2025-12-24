@@ -319,11 +319,14 @@ async def sync_xero_data(
     """
     Fetch financial data from Xero API using official SDK.
     
+    Primary data source: Executive Summary Report (accurate cash flow metrics).
+    
     This endpoint:
-    - Fetches bank account balances (BankSummary report)
-    - Fetches bank transactions (last N months, AUTHORISED only)
-    - Fetches Profit & Loss report (last N months, monthly breakdown)
-    - Fetches Accounts Receivable invoices
+    - Fetches Executive Summary for current month (cash position, cash spent/received, expenses)
+    - Fetches Executive Summary for historical months (for trend analysis)
+    - Fetches Accounts Receivable invoices (for leading indicators)
+    - Fetches Accounts Payable invoices (for leading indicators)
+    - Fetches Profit & Loss report (for AI narrative and expense analysis)
     
     Returns normalized data structure ready for cash runway calculations.
     """
