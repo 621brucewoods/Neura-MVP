@@ -14,6 +14,7 @@ from app.auth.router import router as auth_router
 from app.config import settings
 from app.database import close_db
 from app.integrations.xero.router import router as xero_router
+from app.insights.router import router as insights_router
 
 
 @asynccontextmanager
@@ -97,8 +98,8 @@ def register_routers(app: FastAPI) -> None:
     # Integrations
     app.include_router(xero_router)
     
-    # Future routers:
-    # app.include_router(dashboard_router, prefix="/api/dashboard", tags=["Dashboard"])
+    # Insights
+    app.include_router(insights_router)
 
 
 # Create the application instance
