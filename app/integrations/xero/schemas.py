@@ -128,3 +128,24 @@ class XeroTokenData(BaseModel):
     class Config:
         from_attributes = True
 
+
+class XeroSyncResponse(BaseModel):
+    """Response from data sync endpoint."""
+    
+    success: bool = Field(
+        ...,
+        description="Whether sync was successful"
+    )
+    message: str = Field(
+        ...,
+        description="Status message"
+    )
+    data: dict = Field(
+        ...,
+        description="Fetched financial data from Xero"
+    )
+    fetched_at: str = Field(
+        ...,
+        description="ISO timestamp when data was fetched"
+    )
+

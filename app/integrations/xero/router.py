@@ -1,6 +1,6 @@
 """
 Xero Integration Router
-API endpoints for Xero OAuth 2.0 flow.
+API endpoints for Xero OAuth 2.0 flow and data fetching.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -10,12 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import get_current_user
 from app.database import get_async_session
 from app.integrations.xero.oauth import XeroOAuth, XeroOAuthError, xero_oauth
+from app.integrations.xero.data_fetcher import XeroDataFetcher, XeroDataFetchError
+from app.integrations.xero.sdk_client import create_xero_sdk_client, XeroSDKClientError
 from app.integrations.xero.schemas import (
     XeroAuthURLResponse,
     XeroCallbackResponse,
     XeroConnectionStatus,
     XeroDisconnectResponse,
     XeroRefreshResponse,
+    XeroSyncResponse,
     XeroTokenData,
 )
 from app.integrations.xero.service import XeroService
@@ -294,4 +297,74 @@ async def refresh_xero_tokens(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Token refresh failed: {e.message}",
+        )
+
+
+@router.get(
+    "/sync",
+    response_model=XeroSyncResponse,
+    summary="Sync financial data from Xero",
+    description="Fetch and return financial data from Xero API using official SDK.",
+)
+async def sync_xero_data(
+    current_user: User = Depends(get_current_user),
+    months: int = Query(
+        default=3,
+        ge=1,
+        le=12,
+        description="Number of months of historical data to fetch"
+    ),
+    db: AsyncSession = Depends(get_async_session),
+) -> XeroSyncResponse:
+    """
+    Fetch financial data from Xero API using official SDK.
+    
+    This endpoint:
+    - Fetches bank account balances (BankSummary report)
+    - Fetches bank transactions (last N months, AUTHORISED only)
+    - Fetches Profit & Loss report (last N months, monthly breakdown)
+    - Fetches Accounts Receivable invoices
+    
+    Returns normalized data structure ready for cash runway calculations.
+    """
+    if not current_user.organization:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User has no organization",
+        )
+    
+    try:
+        # Create SDK client (handles token validation and refresh)
+        sdk_client = await create_xero_sdk_client(
+            organization_id=current_user.organization.id,
+            db=db,
+        )
+        
+        # Create data fetcher with SDK client
+        data_fetcher = XeroDataFetcher(sdk_client)
+        
+        # Fetch all data
+        data = await data_fetcher.fetch_all_data(months=months)
+        
+        return XeroSyncResponse(
+            success=True,
+            message=f"Successfully fetched {months} months of financial data",
+            data=data,
+            fetched_at=data.get("fetched_at", ""),
+        )
+        
+    except XeroSDKClientError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=e.message,
+        )
+    except XeroDataFetchError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to fetch Xero data: {e.message}",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Unexpected error: {str(e)}",
         )
