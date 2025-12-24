@@ -8,6 +8,7 @@ from app.models.organization import Organization
 from app.models.xero_token import XeroToken
 from app.models.financial_cache import FinancialCache
 from app.models.calculated_metrics import CalculatedMetrics
+from app.models.executive_summary_cache import ExecutiveSummaryCache
 
 __all__ = [
     "User",
@@ -15,5 +16,6 @@ __all__ = [
     "XeroToken",
     "FinancialCache",
     "CalculatedMetrics",
+    "ExecutiveSummaryCache",
 ]
 

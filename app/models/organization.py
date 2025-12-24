@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from app.models.xero_token import XeroToken
     from app.models.financial_cache import FinancialCache
     from app.models.calculated_metrics import CalculatedMetrics
+    from app.models.executive_summary_cache import ExecutiveSummaryCache
 
 
 class Organization(Base, UUIDMixin, TimestampMixin):
@@ -42,6 +43,7 @@ class Organization(Base, UUIDMixin, TimestampMixin):
         - One Organization has One XeroToken (1:1)
         - One Organization has One FinancialCache (1:1)
         - One Organization has One CalculatedMetrics (1:1)
+        - One Organization has Many ExecutiveSummaryCache (1:N, one per month)
     
     Note:
         This is the tenant isolation boundary.
@@ -90,6 +92,13 @@ class Organization(Base, UUIDMixin, TimestampMixin):
         "CalculatedMetrics",
         back_populates="organization",
         uselist=False,
+        lazy="selectin",
+        cascade="all, delete-orphan",
+    )
+    
+    executive_summary_cache: Mapped[list["ExecutiveSummaryCache"]] = relationship(
+        "ExecutiveSummaryCache",
+        back_populates="organization",
         lazy="selectin",
         cascade="all, delete-orphan",
     )

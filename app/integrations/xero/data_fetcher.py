@@ -9,12 +9,55 @@ import logging
 from datetime import datetime, date, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
+from uuid import UUID
 
 from xero_python.exceptions import ApiException
 
 from app.integrations.xero.sdk_client import XeroSDKClient
+from app.integrations.xero.cache_service import CacheService
 
 logger = logging.getLogger(__name__)
+
+
+def _to_json_serializable(obj: Any) -> Any:
+    """
+    Recursively convert any object to JSON-serializable format.
+    
+    Handles Xero SDK objects, enums, dates, decimals, etc.
+    """
+    if obj is None:
+        return None
+    
+    # Handle dicts
+    if isinstance(obj, dict):
+        return {k: _to_json_serializable(v) for k, v in obj.items()}
+    
+    # Handle lists
+    if isinstance(obj, (list, tuple)):
+        return [_to_json_serializable(item) for item in obj]
+    
+    # Handle Xero SDK objects with to_dict method
+    if hasattr(obj, "to_dict"):
+        return _to_json_serializable(obj.to_dict())
+    
+    # Handle primitives (already serializable)
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+    
+    # Handle Decimal
+    if isinstance(obj, Decimal):
+        return float(obj)
+    
+    # Handle dates/datetimes
+    if isinstance(obj, (date, datetime)):
+        return obj.isoformat()
+    
+    # Handle enums
+    if hasattr(obj, "value"):
+        return _to_json_serializable(obj.value)
+    
+    # Fallback: convert to string
+    return str(obj)
 
 
 class XeroDataFetchError(Exception):
@@ -40,16 +83,18 @@ class XeroDataFetcher:
     Provides clean, normalized data structures for cash runway calculations.
     """
     
-    def __init__(self, sdk_client: XeroSDKClient):
+    def __init__(self, sdk_client: XeroSDKClient, cache_service: Optional[CacheService] = None):
         """
-        Initialize data fetcher with SDK client.
+        Initialize data fetcher with SDK client and optional cache service.
         
         Args:
             sdk_client: Configured XeroSDKClient instance
+            cache_service: Optional CacheService for caching data
         """
         self.client = sdk_client
         self.api = sdk_client.accounting_api
         self.tenant_id = sdk_client.tenant_id
+        self.cache_service = cache_service
     
     def _parse_decimal(self, value: Any, default: str = "0.00") -> Decimal:
         """Safely parse a value to Decimal."""
@@ -163,13 +208,15 @@ class XeroDataFetcher:
                         if label_lower == "expenses":
                             operating_expenses = self._parse_decimal(value_str)
             
+            raw_data = report.to_dict() if hasattr(report, "to_dict") else None
+            
             return {
                 "cash_position": float(cash_position),
                 "cash_spent": float(cash_spent),
                 "cash_received": float(cash_received),
                 "operating_expenses": float(operating_expenses),
                 "report_date": report_date.isoformat(),
-                "raw_data": report.to_dict() if hasattr(report, "to_dict") else None,
+                "raw_data": _to_json_serializable(raw_data),
             }
             
         except ApiException as e:
@@ -410,11 +457,12 @@ class XeroDataFetcher:
             
             if hasattr(response, "reports") and response.reports:
                 report = response.reports[0]
+                raw_data = report.to_dict() if hasattr(report, "to_dict") else None
                 return {
                     "report_id": report.report_id if hasattr(report, "report_id") else None,
                     "report_name": report.report_name if hasattr(report, "report_name") else None,
                     "report_date": report.report_date if hasattr(report, "report_date") else None,
-                    "raw_data": report.to_dict() if hasattr(report, "to_dict") else None,
+                    "raw_data": _to_json_serializable(raw_data),
                 }
             
             return {
@@ -443,15 +491,24 @@ class XeroDataFetcher:
                 "error": str(e),
             }
     
-    async def fetch_all_data(self, months: int = 6) -> dict[str, Any]:
+    async def fetch_all_data(
+        self, 
+        organization_id: Optional[UUID] = None,
+        months: int = 6,
+        force_refresh: bool = False
+    ) -> dict[str, Any]:
         """
         Fetch all financial data required for cash runway calculations.
         
         Primary data source: Executive Summary Report (current + historical).
         Additional data: Receivables, Payables, P&L for context and AI narrative.
         
+        Uses cache when available and not force_refresh.
+        
         Args:
+            organization_id: Organization UUID (required for caching)
             months: Number of historical months to fetch (default: 6)
+            force_refresh: If True, bypass cache and fetch fresh data
         
         Returns:
             Complete financial data structure
@@ -459,58 +516,127 @@ class XeroDataFetcher:
         try:
             errors = []
             
+            # Try cache first (if cache_service and organization_id provided, and not force_refresh)
+            use_cache = (
+                self.cache_service is not None
+                and organization_id is not None
+                and not force_refresh
+            )
+            
             executive_summary_current = None
-            executive_summary_history = None
+            executive_summary_history_cached = {}
+            executive_summary_history_missing = []
             receivables = None
             payables = None
             profit_loss = None
             
-            try:
-                executive_summary_current = await self.fetch_executive_summary()
-            except XeroDataFetchError as e:
-                errors.append(f"Executive Summary (current): {e.message}")
-                executive_summary_current = {
-                    "cash_position": 0.0,
-                    "cash_spent": 0.0,
-                    "cash_received": 0.0,
-                    "operating_expenses": 0.0,
-                    "report_date": datetime.now(timezone.utc).date().isoformat(),
-                    "raw_data": None,
-                }
+            if use_cache:
+                # Get cached Executive Summary
+                (
+                    executive_summary_current,
+                    executive_summary_history_cached,
+                    executive_summary_history_missing,
+                ) = await self.cache_service.get_cached_executive_summary(
+                    organization_id, months
+                )
+                
+                # Get cached financial data
+                cached_financial = await self.cache_service.get_cached_financial_data(
+                    organization_id
+                )
+                if cached_financial:
+                    receivables = cached_financial.get("invoices_receivable")
+                    payables = cached_financial.get("invoices_payable")
+                    profit_loss = cached_financial.get("profit_loss")
             
-            try:
-                executive_summary_history = await self.fetch_executive_summary_history(months=months)
-            except Exception as e:
-                errors.append(f"Executive Summary (history): {str(e)}")
-                executive_summary_history = []
+            # Fetch current Executive Summary if not cached
+            if executive_summary_current is None:
+                try:
+                    executive_summary_current = await self.fetch_executive_summary()
+                except XeroDataFetchError as e:
+                    errors.append(f"Executive Summary (current): {e.message}")
+                    executive_summary_current = {
+                        "cash_position": 0.0,
+                        "cash_spent": 0.0,
+                        "cash_received": 0.0,
+                        "operating_expenses": 0.0,
+                        "report_date": datetime.now(timezone.utc).date().isoformat(),
+                        "raw_data": None,
+                    }
             
-            try:
-                receivables = await self.fetch_receivables()
-            except XeroDataFetchError as e:
-                errors.append(f"Receivables: {e.message}")
-                receivables = {
-                    "total": 0.0,
-                    "count": 0,
-                    "overdue_amount": 0.0,
-                    "overdue_count": 0,
-                    "avg_days_overdue": 0.0,
-                    "invoices": [],
-                }
+            # Fetch missing historical months
+            executive_summary_history_fetched = []
+            if executive_summary_history_missing:
+                try:
+                    # Fetch only missing months
+                    for missing_date in executive_summary_history_missing:
+                        month_data = await self.fetch_executive_summary(report_date=missing_date)
+                        executive_summary_history_fetched.append(month_data)
+                except Exception as e:
+                    errors.append(f"Executive Summary (history): {str(e)}")
             
-            try:
-                payables = await self.fetch_payables()
-            except XeroDataFetchError as e:
-                errors.append(f"Payables: {e.message}")
-                payables = {
-                    "total": 0.0,
-                    "count": 0,
-                    "overdue_amount": 0.0,
-                    "overdue_count": 0,
-                    "avg_days_overdue": 0.0,
-                    "invoices": [],
-                }
+            # Combine cached and fetched historical data
+            executive_summary_history = list(executive_summary_history_cached.values())
+            executive_summary_history.extend(executive_summary_history_fetched)
+            # Sort by report_date (oldest first)
+            executive_summary_history.sort(key=lambda x: x.get("report_date", ""))
             
-            profit_loss = await self.fetch_profit_loss(months=3)
+            # Fetch receivables if not cached
+            if receivables is None:
+                try:
+                    receivables = await self.fetch_receivables()
+                except XeroDataFetchError as e:
+                    errors.append(f"Receivables: {e.message}")
+                    receivables = {
+                        "total": 0.0,
+                        "count": 0,
+                        "overdue_amount": 0.0,
+                        "overdue_count": 0,
+                        "avg_days_overdue": 0.0,
+                        "invoices": [],
+                    }
+            
+            # Fetch payables if not cached
+            if payables is None:
+                try:
+                    payables = await self.fetch_payables()
+                except XeroDataFetchError as e:
+                    errors.append(f"Payables: {e.message}")
+                    payables = {
+                        "total": 0.0,
+                        "count": 0,
+                        "overdue_amount": 0.0,
+                        "overdue_count": 0,
+                        "avg_days_overdue": 0.0,
+                        "invoices": [],
+                    }
+            
+            # Fetch P&L if not cached
+            if profit_loss is None:
+                profit_loss = await self.fetch_profit_loss(months=3)
+            
+            # Save to cache if we fetched new data
+            if use_cache and organization_id:
+                try:
+                    # Save Executive Summary
+                    if executive_summary_current or executive_summary_history_fetched:
+                        await self.cache_service.save_executive_summary_cache(
+                            organization_id=organization_id,
+                            current=executive_summary_current,
+                            historical=executive_summary_history_fetched,
+                        )
+                    
+                    # Save financial data (if we fetched any)
+                    if receivables or payables or profit_loss:
+                        await self.cache_service.save_financial_data_cache(
+                            organization_id=organization_id,
+                            receivables=receivables,
+                            payables=payables,
+                            profit_loss=profit_loss,
+                        )
+                except Exception as e:
+                    logger.warning("Failed to save to cache: %s", e)
+                    # Don't fail the request if cache save fails
             
             if errors:
                 logger.warning("Some data fetch operations failed: %s", ", ".join(errors))

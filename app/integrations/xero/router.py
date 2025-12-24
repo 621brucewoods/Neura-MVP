@@ -12,6 +12,7 @@ from app.database import get_async_session
 from app.integrations.xero.oauth import XeroOAuth, XeroOAuthError, xero_oauth
 from app.integrations.xero.data_fetcher import XeroDataFetcher, XeroDataFetchError
 from app.integrations.xero.sdk_client import create_xero_sdk_client, XeroSDKClientError
+from app.integrations.xero.cache_service import CacheService
 from app.integrations.xero.schemas import (
     XeroAuthURLResponse,
     XeroCallbackResponse,
@@ -304,7 +305,7 @@ async def refresh_xero_tokens(
     "/sync",
     response_model=XeroSyncResponse,
     summary="Sync financial data from Xero",
-    description="Fetch and return financial data from Xero API using official SDK.",
+    description="Fetch and return financial data from Xero API using official SDK. Uses cache when available.",
 )
 async def sync_xero_data(
     current_user: User = Depends(get_current_user),
@@ -314,6 +315,10 @@ async def sync_xero_data(
         le=12,
         description="Number of months of historical data to fetch"
     ),
+    force_refresh: bool = Query(
+        default=False,
+        description="If true, bypass cache and fetch fresh data from Xero"
+    ),
     db: AsyncSession = Depends(get_async_session),
 ) -> XeroSyncResponse:
     """
@@ -322,6 +327,7 @@ async def sync_xero_data(
     Primary data source: Executive Summary Report (accurate cash flow metrics).
     
     This endpoint:
+    - Uses cache when available (unless force_refresh=true)
     - Fetches Executive Summary for current month (cash position, cash spent/received, expenses)
     - Fetches Executive Summary for historical months (for trend analysis)
     - Fetches Accounts Receivable invoices (for leading indicators)
@@ -337,17 +343,24 @@ async def sync_xero_data(
         )
     
     try:
+        # Create cache service
+        cache_service = CacheService(db)
+        
         # Create SDK client (handles token validation and refresh)
         sdk_client = await create_xero_sdk_client(
             organization_id=current_user.organization.id,
             db=db,
         )
         
-        # Create data fetcher with SDK client
-        data_fetcher = XeroDataFetcher(sdk_client)
+        # Create data fetcher with SDK client and cache service
+        data_fetcher = XeroDataFetcher(sdk_client, cache_service=cache_service)
         
-        # Fetch all data
-        data = await data_fetcher.fetch_all_data(months=months)
+        # Fetch all data (with caching)
+        data = await data_fetcher.fetch_all_data(
+            organization_id=current_user.organization.id,
+            months=months,
+            force_refresh=force_refresh,
+        )
         
         return XeroSyncResponse(
             success=True,
