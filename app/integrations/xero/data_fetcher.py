@@ -79,6 +79,15 @@ class XeroDataFetcher:
         Args:
             report_date: Date for the report (defaults to today).
                         Use month-end dates (e.g., 2025-12-31) for historical months.
+                        
+                        Important: Xero always returns the FULL calendar month report,
+                        regardless of the date passed. For example:
+                        - If today is Dec 23, 2025 and report_date=None:
+                          Returns: "For the month of December 2025" (Dec 1-31)
+                          Data: Actual transactions up to Dec 23 only (not projected)
+                        - If report_date=2025-11-30:
+                          Returns: "For the month of November 2025" (Nov 1-30)
+                          Data: Complete November data
         
         Returns:
             {
@@ -185,6 +194,11 @@ class XeroDataFetcher:
         
         Args:
             months: Number of historical months to fetch (default: 6)
+                   Fetches: (current-1), (current-2), ..., (current-months)
+                   Example: If today is Dec 23, 2025 and months=3:
+                            - Nov 2025 (month-end: 2025-11-30)
+                            - Oct 2025 (month-end: 2025-10-31)
+                            - Sep 2025 (month-end: 2025-09-30)
         
         Returns:
             List of Executive Summary data, one per month, ordered from oldest to newest.
@@ -192,11 +206,17 @@ class XeroDataFetcher:
         """
         history = []
         today = datetime.now(timezone.utc).date()
+        current_month_start = today.replace(day=1)
         
-        for i in range(months):
-            month_date = today.replace(day=1) - timedelta(days=1)
-            month_date = month_date.replace(day=1) - timedelta(days=i * 30)
-            month_end = self._get_month_end_date(month_date.year, month_date.month)
+        for i in range(1, months + 1):
+            target_year = current_month_start.year
+            target_month = current_month_start.month - i
+            
+            while target_month <= 0:
+                target_month += 12
+                target_year -= 1
+            
+            month_end = self._get_month_end_date(target_year, target_month)
             
             try:
                 summary = await self.fetch_executive_summary(report_date=month_end)
