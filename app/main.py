@@ -9,7 +9,11 @@ from typing import AsyncGenerator
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
+from app.auth.rate_limit import limiter
 from app.auth.router import router as auth_router
 from app.config import settings
 from app.database import close_db
@@ -51,6 +55,10 @@ def create_application() -> FastAPI:
         openapi_url="/openapi.json" if settings.debug else None,
         lifespan=lifespan,
     )
+    
+    # Configure rate limiting
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     
     # Configure CORS
     app.add_middleware(

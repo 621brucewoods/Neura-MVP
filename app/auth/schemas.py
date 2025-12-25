@@ -34,6 +34,13 @@ class RefreshRequest(BaseModel):
     refresh_token: str = Field(..., description="Valid refresh token")
 
 
+class ChangePasswordRequest(BaseModel):
+    """Request body for password change."""
+    
+    current_password: str = Field(..., description="Current password for verification")
+    new_password: str = Field(..., min_length=8, description="New password (min 8 characters)")
+
+
 # =============================================================================
 # Response Schemas
 # =============================================================================

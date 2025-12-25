@@ -4,9 +4,10 @@ Represents authenticated users in the system.
 """
 
 import uuid
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import String, Boolean, Index
+from sqlalchemy import String, Boolean, Index, Integer, DateTime
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, TimestampMixin, UUIDMixin
@@ -63,6 +64,27 @@ class User(Base, UUIDMixin, TimestampMixin):
         nullable=False,
     )
     
+    # Account lockout fields
+    failed_login_attempts: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+        comment="Number of consecutive failed login attempts",
+    )
+    
+    locked_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+        comment="Account locked until this timestamp (null if not locked)",
+    )
+    
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Last successful login timestamp",
+    )
+    
     # Relationships
     organization: Mapped[Optional["Organization"]] = relationship(
         "Organization",
@@ -76,6 +98,12 @@ class User(Base, UUIDMixin, TimestampMixin):
     __table_args__ = (
         Index("ix_users_email_active", "email", "is_active"),
     )
+    
+    def is_locked(self) -> bool:
+        """Check if account is currently locked."""
+        if not self.locked_until:
+            return False
+        return datetime.now(timezone.utc) < self.locked_until
     
     def __repr__(self) -> str:
         return f"<User(id={self.id}, email={self.email!r}, is_active={self.is_active})>"

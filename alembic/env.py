@@ -29,6 +29,10 @@ from app.models import (
     XeroToken,
     FinancialCache,
     CalculatedMetrics,
+    ExecutiveSummaryCache,
+    LoginAttempt,
+    RefreshToken,
+    TokenBlacklist,
 )
 
 # Alembic Config object

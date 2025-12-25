@@ -54,6 +54,16 @@ async def get_current_user(
     if payload.get("type") != "access":
         raise credentials_exception
     
+    # Check if token is blacklisted
+    auth_service = AuthService(session)
+    jti = payload.get("jti")
+    if jti and await auth_service.is_token_blacklisted(jti):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
     user_id_str = payload.get("sub")
     if not user_id_str:
         raise credentials_exception
@@ -63,7 +73,6 @@ async def get_current_user(
     except ValueError:
         raise credentials_exception
     
-    auth_service = AuthService(session)
     user = await auth_service.get_user_by_id(user_id)
     
     if not user:
@@ -73,6 +82,13 @@ async def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is deactivated",
+        )
+    
+    # Check if account is locked
+    if user.is_locked():
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail="Account is temporarily locked",
         )
     
     return user

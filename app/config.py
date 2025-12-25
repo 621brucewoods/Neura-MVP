@@ -51,6 +51,17 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = 7
     
     # ============================================
+    # Account Security
+    # ============================================
+    max_failed_login_attempts: int = 5
+    account_lockout_minutes: int = 30
+    password_min_length: int = 8
+    password_require_uppercase: bool = True
+    password_require_lowercase: bool = True
+    password_require_numbers: bool = True
+    password_require_special: bool = True
+    
+    # ============================================
     # Xero API
     # ============================================
     xero_client_id: str = ""
