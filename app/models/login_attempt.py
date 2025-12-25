@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Boolean, String, Index
+from sqlalchemy import DateTime, Boolean, String, Index, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -44,6 +44,7 @@ class LoginAttempt(Base, UUIDMixin):
     
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
         comment="User ID if user exists (null for non-existent users)",

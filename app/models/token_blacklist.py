@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, String, Index
+from sqlalchemy import DateTime, String, Index, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -53,6 +53,7 @@ class TokenBlacklist(Base, UUIDMixin):
     # Foreign key to user
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
         comment="User who owns this token",
