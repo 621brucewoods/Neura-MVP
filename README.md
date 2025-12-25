@@ -45,12 +45,26 @@ pip install -r requirements.txt
 
 ### 4. Set up environment variables
 
-```bash
-# Copy the example file
-cp env.example .env
+Create a `.env` file in the project root with the following variables:
 
-# Edit .env with your values
-# Required: DATABASE_URL, JWT_SECRET_KEY, XERO_CLIENT_ID, XERO_CLIENT_SECRET, OPENAI_API_KEY
+```bash
+# Database
+DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/cashflow_db
+
+# JWT Authentication
+JWT_SECRET_KEY=your-secret-key-here
+
+# Xero Integration
+XERO_CLIENT_ID=your-xero-client-id
+XERO_CLIENT_SECRET=your-xero-client-secret
+XERO_REDIRECT_URI=http://localhost:8000/integrations/xero/callback
+
+# OpenAI (optional for MVP)
+OPENAI_API_KEY=your-openai-api-key
+
+# Application Settings
+DEBUG=true
+ENVIRONMENT=development
 ```
 
 ### 5. Set up the database
@@ -59,7 +73,8 @@ cp env.example .env
 # Create PostgreSQL database
 createdb cashflow_db
 
-# Run migrations (after Milestone 2)
+# Run database migrations
+cd Neura-MVP
 alembic upgrade head
 ```
 
@@ -69,8 +84,8 @@ alembic upgrade head
 # Development mode with auto-reload
 uvicorn app.main:app --reload
 
-# Or using Python directly
-python -m app.main
+# Or using uvicorn directly
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 The API will be available at `http://localhost:8000`
@@ -92,31 +107,46 @@ Neura-MVP/
 │   ├── config.py            # Settings & configuration
 │   ├── database/            # Database connection & base models
 │   ├── models/              # SQLAlchemy models
-│   ├── schemas/             # Pydantic schemas
 │   ├── auth/                # Authentication logic
-│   ├── integrations/        # External integrations (Xero)
-│   ├── api/                 # API endpoints
-│   ├── services/            # Business logic
-│   └── prompts/             # AI prompt templates
-├── alembic/                 # Database migrations
-├── tests/                   # Test files
+│   ├── insights/            # Financial insights & calculations
+│   ├── integrations/       # External integrations (Xero)
+│   └── alembic/             # Database migrations
 ├── requirements.txt         # Python dependencies
-├── .env.example             # Environment template
 └── README.md                # This file
 ```
 
 ## 🔑 API Endpoints
 
+### Authentication
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/auth/signup` | Register new user |
+| POST | `/auth/login` | Login, get tokens |
+| POST | `/auth/refresh` | Refresh access token |
+| POST | `/auth/logout` | Logout and revoke tokens |
+| POST | `/auth/change-password` | Change user password |
+| GET | `/auth/me` | Get current user profile |
+
+### Xero Integration
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/integrations/xero/connect` | Start Xero OAuth connection |
+| GET | `/integrations/xero/callback` | Handle Xero OAuth callback |
+| GET | `/integrations/xero/status` | Check Xero connection status |
+| POST | `/integrations/xero/disconnect` | Disconnect Xero integration |
+| POST | `/integrations/xero/refresh` | Manually refresh Xero tokens |
+| GET | `/integrations/xero/sync` | Sync financial data from Xero |
+
+### Insights
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/insights` | Get all financial insights (cash runway, trends, leading indicators) |
+
+### System
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/` | API information |
 | GET | `/health` | Health check |
-| POST | `/auth/signup` | Register new user |
-| POST | `/auth/login` | Login, get tokens |
-| GET | `/integrations/xero/connect` | Start Xero OAuth |
-| GET | `/integrations/xero/callback` | OAuth callback |
-| GET | `/api/dashboard/cash-runway` | Get cash flow metrics |
-| GET | `/api/dashboard/trends` | Get historical trends |
 
 ## 🧪 Running Tests
 
@@ -133,15 +163,17 @@ pytest tests/test_auth.py
 
 ## 📝 Environment Variables
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `DATABASE_URL` | PostgreSQL connection string | ✅ |
-| `JWT_SECRET_KEY` | Secret for JWT signing | ✅ |
-| `XERO_CLIENT_ID` | Xero app client ID | ✅ |
-| `XERO_CLIENT_SECRET` | Xero app client secret | ✅ |
-| `OPENAI_API_KEY` | OpenAI API key | ✅ |
-| `DEBUG` | Enable debug mode | ❌ |
-| `CACHE_TTL_MINUTES` | Cache duration (default: 15) | ❌ |
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
+| `DATABASE_URL` | PostgreSQL connection string | ✅ | - |
+| `JWT_SECRET_KEY` | Secret for JWT signing | ✅ | - |
+| `XERO_CLIENT_ID` | Xero app client ID | ✅ | - |
+| `XERO_CLIENT_SECRET` | Xero app client secret | ✅ | - |
+| `XERO_REDIRECT_URI` | Xero OAuth redirect URI | ❌ | `http://localhost:8000/integrations/xero/callback` |
+| `OPENAI_API_KEY` | OpenAI API key | ❌ | - |
+| `DEBUG` | Enable debug mode | ❌ | `false` |
+| `CACHE_TTL_MINUTES` | Cache duration in minutes | ❌ | `15` |
+| `CORS_ORIGINS` | Allowed CORS origins (comma-separated) | ❌ | `http://localhost:3000,http://localhost:5173` |
 
 ## 🔒 Security Notes
 

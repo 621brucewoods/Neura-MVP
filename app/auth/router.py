@@ -303,3 +303,4 @@ async def get_me(current_user: CurrentUser) -> UserWithOrgResponse:
         organization_id=current_user.organization.id if current_user.organization else None,
         organization_name=current_user.organization.name if current_user.organization else None,
     )
+
