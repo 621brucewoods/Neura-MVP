@@ -45,7 +45,7 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
     summary="Register new user",
     description="Create a new user account with an organization.",
 )
-@limiter.limit("3/hour")
+@limiter.limit("10/hour")
 async def signup(
     request: Request,
     signup_data: SignupRequest,
@@ -59,7 +59,7 @@ async def signup(
     - Organization linked to user
     - JWT access and refresh tokens
     
-    Rate limited to 3 requests per hour per IP.
+    Rate limited to 10 requests per hour per IP.
     """
     # Validate password strength
     is_valid, error_message = validate_password_strength(signup_data.password)
