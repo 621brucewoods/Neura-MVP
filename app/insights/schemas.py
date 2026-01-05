@@ -69,11 +69,50 @@ class LeadingIndicatorsMetrics(BaseModel):
     cash_stress_signals: list[str] = Field(..., description="List of identified cash stress signals")
 
 
+class CashPressureMetrics(BaseModel):
+    """Cash pressure status metrics."""
+    
+    model_config = ConfigDict(extra="allow")
+    
+    status: str = Field(..., description="Cash pressure status: GREEN, AMBER, or RED")
+    confidence: str = Field(..., description="Confidence level: high, medium, or low")
+
+
+class ProfitabilityMetrics(BaseModel):
+    """Profitability analysis metrics."""
+    
+    model_config = ConfigDict(extra="allow")
+    
+    revenue: Optional[float] = Field(None, description="Total revenue")
+    cost_of_sales: Optional[float] = Field(None, description="Cost of sales")
+    gross_profit: Optional[float] = Field(None, description="Gross profit")
+    gross_margin_pct: Optional[float] = Field(None, description="Gross margin percentage")
+    expenses: Optional[float] = Field(None, description="Total expenses")
+    net_profit: Optional[float] = Field(None, description="Net profit")
+    profit_trend: str = Field(..., description="Profit trend: improving, declining, or stable")
+    risk_level: str = Field(..., description="Risk level: low, medium, or high")
+
+
+class UpcomingCommitmentsMetrics(BaseModel):
+    """Upcoming cash commitments metrics."""
+    
+    model_config = ConfigDict(extra="allow")
+    
+    upcoming_amount: float = Field(..., description="Total amount due in next 30 days")
+    upcoming_count: int = Field(..., description="Number of bills due in next 30 days")
+    days_ahead: int = Field(..., description="Number of days analyzed")
+    large_upcoming_bills: list[dict[str, Any]] = Field(..., description="Large upcoming bills (>= $1000)")
+    squeeze_risk: str = Field(..., description="Cash squeeze risk: low, medium, or high")
+
+
 class InsightsResponse(BaseModel):
     """Complete insights response."""
     
     cash_runway: CashRunwayMetrics = Field(..., description="Cash runway calculations")
     trends: TrendMetrics = Field(..., description="Trend analysis")
     leading_indicators: LeadingIndicatorsMetrics = Field(..., description="Leading indicators")
+    cash_pressure: CashPressureMetrics = Field(..., description="Cash pressure status")
+    profitability: ProfitabilityMetrics = Field(..., description="Profitability analysis")
+    upcoming_commitments: UpcomingCommitmentsMetrics = Field(..., description="Upcoming cash commitments")
     calculated_at: str = Field(..., description="ISO timestamp when insights were calculated")
 

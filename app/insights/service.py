@@ -4,12 +4,15 @@ Orchestrates calculation of financial insights from Xero data.
 """
 
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from app.insights.calculator import (
     CashRunwayCalculator,
     TrendAnalyzer,
     LeadingIndicatorsCalculator,
+    CashPressureCalculator,
+    ProfitabilityCalculator,
+    UpcomingCommitmentsCalculator,
 )
 
 logger = logging.getLogger(__name__)
@@ -93,6 +96,70 @@ class InsightsService:
         )
     
     @staticmethod
+    def calculate_cash_pressure(
+        cash_runway: dict[str, Any],
+        trends: dict[str, Any]
+    ) -> dict[str, Any]:
+        """
+        Calculate cash pressure status.
+        
+        Args:
+            cash_runway: Cash runway metrics
+            trends: Trend analysis metrics
+        
+        Returns:
+            Dictionary with cash pressure status
+        """
+        return CashPressureCalculator.calculate(
+            runway_months=cash_runway.get("runway_months"),
+            runway_status=cash_runway.get("status"),
+            revenue_volatility=trends.get("revenue_volatility"),
+        )
+    
+    @staticmethod
+    def calculate_profitability(
+        profit_loss_data: Optional[dict[str, Any]],
+        executive_summary_current: dict[str, Any],
+        executive_summary_history: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """
+        Calculate profitability metrics.
+        
+        Args:
+            profit_loss_data: P&L report data
+            executive_summary_current: Current month Executive Summary
+            executive_summary_history: Historical months
+        
+        Returns:
+            Dictionary with profitability metrics
+        """
+        return ProfitabilityCalculator.calculate(
+            profit_loss_data=profit_loss_data,
+            executive_summary_current=executive_summary_current,
+            executive_summary_history=executive_summary_history,
+        )
+    
+    @staticmethod
+    def calculate_upcoming_commitments(
+        payables: dict[str, Any],
+        cash_position: float
+    ) -> dict[str, Any]:
+        """
+        Calculate upcoming cash commitments.
+        
+        Args:
+            payables: Payables data
+            cash_position: Current cash balance
+        
+        Returns:
+            Dictionary with upcoming commitments metrics
+        """
+        return UpcomingCommitmentsCalculator.calculate(
+            payables=payables,
+            cash_position=cash_position,
+        )
+    
+    @staticmethod
     def calculate_all_insights(
         financial_data: dict[str, Any]
     ) -> dict[str, Any]:
@@ -107,11 +174,15 @@ class InsightsService:
             - cash_runway
             - trends
             - leading_indicators
+            - cash_pressure
+            - profitability
+            - upcoming_commitments
         """
         executive_summary_current = financial_data.get("executive_summary_current", {})
         executive_summary_history = financial_data.get("executive_summary_history", [])
         receivables = financial_data.get("invoices_receivable", {})
         payables = financial_data.get("invoices_payable", {})
+        profit_loss = financial_data.get("profit_loss")
         
         cash_runway = InsightsService.calculate_cash_runway(
             executive_summary_current
@@ -129,9 +200,28 @@ class InsightsService:
             executive_summary_history
         )
         
+        cash_pressure = InsightsService.calculate_cash_pressure(
+            cash_runway,
+            trends
+        )
+        
+        profitability = InsightsService.calculate_profitability(
+            profit_loss,
+            executive_summary_current,
+            executive_summary_history
+        )
+        
+        upcoming_commitments = InsightsService.calculate_upcoming_commitments(
+            payables,
+            executive_summary_current.get("cash_position", 0.0)
+        )
+        
         return {
             "cash_runway": cash_runway,
             "trends": trends,
             "leading_indicators": leading_indicators,
+            "cash_pressure": cash_pressure,
+            "profitability": profitability,
+            "upcoming_commitments": upcoming_commitments,
         }
 

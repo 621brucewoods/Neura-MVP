@@ -3,6 +3,7 @@ Database Connection Module
 Configures async SQLAlchemy engine and session factory.
 """
 
+import logging
 from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import (
@@ -10,17 +11,18 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.pool import NullPool
 
 from app.config import settings
 from app.database.base import Base
 
+# Disable SQLAlchemy engine query logging
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 # Create async engine with connection pooling
 # Use NullPool for serverless/testing, otherwise use default pool
 async_engine = create_async_engine(
     settings.database_url,
-    echo=settings.debug,  # Log SQL queries in debug mode
+    echo=False,  # Disable SQL query logging
     future=True,
     pool_pre_ping=True,  # Verify connections before use
 )

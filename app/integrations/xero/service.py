@@ -120,14 +120,12 @@ class XeroService:
         """
         Refresh token if it's expired or expiring soon.
         
-        Proactively refreshes if token expires within 5 minutes.
-        
         Args:
             token: XeroToken to check/refresh
-            
+        
         Returns:
             Refreshed token (or original if refresh not needed)
-            
+        
         Raises:
             XeroOAuthError: If refresh fails
         """

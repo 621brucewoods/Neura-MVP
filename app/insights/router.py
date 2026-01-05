@@ -80,6 +80,9 @@ async def get_insights(
             cash_runway=insights["cash_runway"],
             trends=insights["trends"],
             leading_indicators=insights["leading_indicators"],
+            cash_pressure=insights["cash_pressure"],
+            profitability=insights["profitability"],
+            upcoming_commitments=insights["upcoming_commitments"],
             calculated_at=datetime.now(timezone.utc).isoformat(),
         )
         

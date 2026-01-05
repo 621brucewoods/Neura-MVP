@@ -16,7 +16,7 @@ from xero_python.accounting import AccountingApi
 
 from app.config import settings
 from app.integrations.xero.service import XeroService
-from app.models.xero_token import XeroToken
+from app.models.xero_token import XeroConnectionStatus, XeroToken
 
 logger = logging.getLogger(__name__)
 
@@ -79,14 +79,17 @@ class XeroSDKClient:
         """
         Token saver callback for SDK.
         
-        Note: This is called synchronously by the SDK.
-        We update the in-memory token dict and flag for async save.
+        Note: This is called synchronously by the SDK during auto-refresh.
+        We update the in-memory token dict and token object.
+        Database commit must be called explicitly after SDK operations.
         """
         self._token_dict.update(new_token)
         
-        # Update the token object (will be committed later)
+        # Update the token object
         self.token.access_token = new_token.get("access_token", self.token.access_token)
         self.token.refresh_token = new_token.get("refresh_token", self.token.refresh_token)
+        self.token.status = XeroConnectionStatus.ACTIVE.value
+        self.token.last_error = None
         
         if "scope" in new_token:
             self.token.scope = new_token["scope"]
@@ -99,7 +102,7 @@ class XeroSDKClient:
         
         self.token.last_refreshed_at = datetime.now(timezone.utc)
         
-        logger.info("SDK refreshed tokens - will save on next commit")
+        logger.info("SDK refreshed tokens - commit required after operation")
     
     def _create_api_client(self) -> ApiClient:
         """Create configured ApiClient instance."""
@@ -155,18 +158,15 @@ async def create_xero_sdk_client(
     """
     Create an SDK client for an organization.
     
-    Factory function that:
-    1. Gets token from database
-    2. Refreshes if needed
-    3. Creates configured SDK client
+    SDK will automatically refresh tokens when needed during API calls.
     
     Args:
         organization_id: Organization UUID
         db: Database session
-        
+    
     Returns:
         Configured XeroSDKClient
-        
+    
     Raises:
         XeroSDKClientError: If no valid connection exists
     """
@@ -180,19 +180,12 @@ async def create_xero_sdk_client(
             "No Xero connection found. Please connect your Xero account first."
         )
     
-    if not token.is_active:
+    # Only block explicitly disconnected tokens (user disconnected)
+    if token.status == XeroConnectionStatus.DISCONNECTED.value:
         raise XeroSDKClientError(
-            f"Xero connection is not active. Status: {token.status}"
+            "Xero connection has been disconnected. Please reconnect your Xero account."
         )
     
-    # Proactively refresh if needed (before creating SDK client)
-    if token.needs_refresh:
-        try:
-            token = await xero_service.refresh_token_if_needed(token)
-        except Exception as e:
-            raise XeroSDKClientError(
-                f"Failed to refresh token: {str(e)}"
-            )
-    
+    # Create SDK client - SDK will handle token refresh automatically
     return XeroSDKClient(token, xero_service)
 

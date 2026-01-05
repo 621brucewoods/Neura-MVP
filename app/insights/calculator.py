@@ -4,6 +4,7 @@ Pure calculation functions for cash runway, trends, and leading indicators.
 """
 
 import logging
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Optional
 from statistics import mean, stdev
@@ -218,7 +219,7 @@ class TrendAnalyzer:
             std_dev = stdev(cash_received_values) if len(cash_received_values) > 1 else 0.0
             coefficient_of_variation = (std_dev / abs(mean_value)) * 100
             return float(coefficient_of_variation)
-        except Exception:
+        except (ValueError, TypeError, ZeroDivisionError):
             return None
     
     @staticmethod
@@ -530,5 +531,370 @@ class LeadingIndicatorsCalculator:
             "receivables_health": receivables_health,
             "payables_pressure": payables_pressure,
             "cash_stress_signals": cash_stress_signals,
+        }
+
+
+class CashPressureCalculator:
+    """
+    Calculates cash pressure status (GREEN/AMBER/RED).
+    
+    Combines runway status with revenue volatility to determine overall pressure.
+    """
+    
+    @staticmethod
+    def calculate(
+        runway_months: Optional[float],
+        runway_status: str,
+        revenue_volatility: Optional[float]
+    ) -> dict[str, Any]:
+        """
+        Calculate cash pressure status.
+        
+        Args:
+            runway_months: Cash runway in months (None if infinite/profitable)
+            runway_status: Runway status (healthy/warning/critical/negative/infinite)
+            revenue_volatility: Revenue volatility coefficient (None if insufficient data)
+        
+        Returns:
+            Dictionary with pressure status and confidence
+        """
+        if runway_status == "infinite":
+            return {
+                "status": "GREEN",
+                "confidence": "high",
+            }
+        
+        if runway_status == "negative":
+            return {
+                "status": "RED",
+                "confidence": "high",
+            }
+        
+        if runway_status == "critical":
+            return {
+                "status": "RED",
+                "confidence": "high",
+            }
+        
+        if runway_status == "warning":
+            if runway_months is not None and runway_months < 3.5:
+                return {
+                    "status": "AMBER",
+                    "confidence": "high",
+                }
+            if revenue_volatility is not None and revenue_volatility > 50:
+                return {
+                    "status": "AMBER",
+                    "confidence": "high",
+                }
+            return {
+                "status": "AMBER",
+                "confidence": "medium",
+            }
+        
+        if runway_status == "healthy":
+            if revenue_volatility is not None and revenue_volatility > 40:
+                return {
+                    "status": "AMBER",
+                    "confidence": "medium",
+                }
+            return {
+                "status": "GREEN",
+                "confidence": "high",
+            }
+        
+        return {
+            "status": "AMBER",
+            "confidence": "low",
+        }
+
+
+class ProfitabilityCalculator:
+    """
+    Calculates profitability metrics from P&L data.
+    
+    Analyzes gross margin, profit trends, and profitability pressure.
+    """
+    
+    @staticmethod
+    def _extract_pnl_values(pnl_data: Optional[dict[str, Any]]) -> dict[str, Any]:
+        """
+        Extract key values from P&L report structure.
+        
+        Args:
+            pnl_data: Raw P&L data from Xero
+        
+        Returns:
+            Dictionary with extracted values
+        """
+        if not pnl_data or not pnl_data.get("raw_data"):
+            return {
+                "revenue": None,
+                "cost_of_sales": None,
+                "gross_profit": None,
+                "expenses": None,
+                "net_profit": None,
+            }
+        
+        raw_data = pnl_data.get("raw_data", {})
+        rows = raw_data.get("rows", [])
+        
+        revenue = None
+        cost_of_sales = None
+        gross_profit = None
+        expenses = None
+        net_profit = None
+        
+        def _find_value_in_rows(rows_list: list, search_terms: list[str]) -> Optional[float]:
+            for row in rows_list:
+                if not isinstance(row, dict):
+                    continue
+                
+                title = row.get("title", "").lower()
+                cells = row.get("cells", [])
+                
+                for term in search_terms:
+                    if term in title:
+                        if cells and len(cells) > 1:
+                            value_str = cells[1].get("value", "0")
+                            try:
+                                value = float(str(value_str).replace(",", ""))
+                                if value != 0:
+                                    return value
+                            except (ValueError, TypeError):
+                                continue
+                
+                nested_rows = row.get("rows", [])
+                if nested_rows:
+                    found = _find_value_in_rows(nested_rows, search_terms)
+                    if found is not None:
+                        return found
+            
+            return None
+        
+        revenue = _find_value_in_rows(rows, ["revenue", "income", "sales", "total income"])
+        cost_of_sales = _find_value_in_rows(rows, ["cost of sales", "cogs", "cost of goods"])
+        gross_profit = _find_value_in_rows(rows, ["gross profit"])
+        expenses = _find_value_in_rows(rows, ["expenses", "total expenses", "operating expenses"])
+        net_profit = _find_value_in_rows(rows, ["net profit", "net income", "profit"])
+        
+        return {
+            "revenue": revenue,
+            "cost_of_sales": cost_of_sales,
+            "gross_profit": gross_profit,
+            "expenses": expenses,
+            "net_profit": net_profit,
+        }
+    
+    @staticmethod
+    def calculate_gross_margin(
+        revenue: Optional[float],
+        cost_of_sales: Optional[float],
+        gross_profit: Optional[float]
+    ) -> Optional[float]:
+        """
+        Calculate gross margin percentage.
+        
+        Args:
+            revenue: Total revenue
+            cost_of_sales: Cost of sales
+            gross_profit: Gross profit (if available)
+        
+        Returns:
+            Gross margin percentage, or None if insufficient data
+        """
+        if gross_profit is not None and revenue is not None and revenue != 0:
+            return float((gross_profit / abs(revenue)) * 100)
+        
+        if revenue is not None and cost_of_sales is not None and revenue != 0:
+            gross = revenue - cost_of_sales
+            return float((gross / abs(revenue)) * 100)
+        
+        return None
+    
+    @staticmethod
+    def calculate_profit_trend(
+        executive_summary_current: dict[str, Any],
+        executive_summary_history: list[dict[str, Any]]
+    ) -> str:
+        """
+        Determine profit trend from cash flow.
+        
+        Args:
+            executive_summary_current: Current month Executive Summary
+            executive_summary_history: Historical months (oldest to newest)
+        
+        Returns:
+            Trend: "improving", "declining", or "stable"
+        """
+        if len(executive_summary_history) < 2:
+            return "stable"
+        
+        all_data = executive_summary_history + [executive_summary_current]
+        
+        net_flows = []
+        for month in all_data[-3:]:
+            cash_received = month.get("cash_received", 0.0)
+            cash_spent = month.get("cash_spent", 0.0)
+            net_flow = cash_received - cash_spent
+            net_flows.append(net_flow)
+        
+        if len(net_flows) < 2:
+            return "stable"
+        
+        recent_trend = net_flows[-1] - net_flows[0]
+        
+        if recent_trend > 0:
+            return "improving"
+        elif recent_trend < 0:
+            return "declining"
+        else:
+            return "stable"
+    
+    @staticmethod
+    def calculate(
+        profit_loss_data: Optional[dict[str, Any]],
+        executive_summary_current: dict[str, Any],
+        executive_summary_history: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """
+        Calculate all profitability metrics.
+        
+        Args:
+            profit_loss_data: P&L report data from XeroDataFetcher
+            executive_summary_current: Current month Executive Summary
+            executive_summary_history: Historical months
+        
+        Returns:
+            Dictionary with profitability metrics
+        """
+        pnl_values = ProfitabilityCalculator._extract_pnl_values(profit_loss_data)
+        
+        gross_margin = ProfitabilityCalculator.calculate_gross_margin(
+            revenue=pnl_values["revenue"],
+            cost_of_sales=pnl_values["cost_of_sales"],
+            gross_profit=pnl_values["gross_profit"]
+        )
+        
+        profit_trend = ProfitabilityCalculator.calculate_profit_trend(
+            executive_summary_current,
+            executive_summary_history
+        )
+        
+        risk_level = "low"
+        if gross_margin is not None and gross_margin < 20:
+            risk_level = "high"
+        elif gross_margin is not None and gross_margin < 30:
+            risk_level = "medium"
+        elif profit_trend == "declining":
+            risk_level = "medium"
+        
+        return {
+            "revenue": pnl_values["revenue"],
+            "cost_of_sales": pnl_values["cost_of_sales"],
+            "gross_profit": pnl_values["gross_profit"],
+            "gross_margin_pct": gross_margin,
+            "expenses": pnl_values["expenses"],
+            "net_profit": pnl_values["net_profit"],
+            "profit_trend": profit_trend,
+            "risk_level": risk_level,
+        }
+
+
+class UpcomingCommitmentsCalculator:
+    """
+    Calculates upcoming cash commitments and squeeze risk.
+    
+    Analyzes payables due dates to identify upcoming cash pressure.
+    """
+    
+    @staticmethod
+    def _parse_due_date(due_date_str: Optional[str]) -> Optional[date]:
+        """
+        Parse due date string to date object.
+        
+        Args:
+            due_date_str: Due date as string (ISO format or similar)
+        
+        Returns:
+            Date object, or None if parsing fails
+        """
+        if not due_date_str:
+            return None
+        
+        try:
+            if isinstance(due_date_str, date):
+                return due_date_str
+            
+            if isinstance(due_date_str, datetime):
+                return due_date_str.date()
+            
+            if "T" in str(due_date_str):
+                return datetime.fromisoformat(str(due_date_str).replace("Z", "+00:00")).date()
+            
+            return datetime.strptime(str(due_date_str), "%Y-%m-%d").date()
+        except (ValueError, TypeError, AttributeError):
+            return None
+    
+    @staticmethod
+    def calculate(
+        payables: dict[str, Any],
+        cash_position: float,
+        days_ahead: int = 30
+    ) -> dict[str, Any]:
+        """
+        Calculate upcoming cash commitments.
+        
+        Args:
+            payables: Payables data from XeroDataFetcher
+            cash_position: Current cash balance
+            days_ahead: Number of days to look ahead (default: 30)
+        
+        Returns:
+            Dictionary with upcoming commitments metrics
+        """
+        invoices = payables.get("invoices", [])
+        today = date.today()
+        cutoff_date = today + timedelta(days=days_ahead)
+        
+        upcoming_amount = 0.0
+        upcoming_count = 0
+        large_upcoming_bills = []
+        
+        for invoice in invoices:
+            due_date_str = invoice.get("due_date")
+            due_date = UpcomingCommitmentsCalculator._parse_due_date(due_date_str)
+            
+            if not due_date:
+                continue
+            
+            if due_date > today and due_date <= cutoff_date:
+                amount_due = invoice.get("amount_due", 0.0)
+                if amount_due > 0:
+                    upcoming_amount += amount_due
+                    upcoming_count += 1
+                    
+                    if amount_due >= 1000:
+                        large_upcoming_bills.append({
+                            "invoice_number": invoice.get("number"),
+                            "contact": invoice.get("contact"),
+                            "amount_due": amount_due,
+                            "due_date": due_date.isoformat(),
+                        })
+        
+        squeeze_risk = "low"
+        if upcoming_amount > cash_position * 0.5:
+            squeeze_risk = "high"
+        elif upcoming_amount > cash_position * 0.3:
+            squeeze_risk = "medium"
+        elif len(large_upcoming_bills) >= 3:
+            squeeze_risk = "medium"
+        
+        return {
+            "upcoming_amount": round(upcoming_amount, 2),
+            "upcoming_count": upcoming_count,
+            "days_ahead": days_ahead,
+            "large_upcoming_bills": sorted(large_upcoming_bills, key=lambda x: x["amount_due"], reverse=True)[:5],
+            "squeeze_risk": squeeze_risk,
         }
 
