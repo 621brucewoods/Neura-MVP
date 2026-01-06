@@ -3,6 +3,8 @@ Xero Integration Router
 API endpoints for Xero OAuth 2.0 flow and data fetching.
 """
 
+from datetime import date, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -382,12 +384,8 @@ async def refresh_xero_tokens(
 )
 async def sync_xero_data(
     current_user: User = Depends(get_current_user),
-    months: int = Query(
-        default=3,
-        ge=1,
-        le=12,
-        description="Number of months of historical data to fetch"
-    ),
+    start_date: date = Query(..., description="Start date for P&L period (YYYY-MM-DD)"),
+    end_date: date = Query(..., description="End date for P&L period (YYYY-MM-DD)"),
     force_refresh: bool = Query(
         default=False,
         description="If true, bypass cache and fetch fresh data from Xero"
@@ -397,15 +395,13 @@ async def sync_xero_data(
     """
     Fetch financial data from Xero API using official SDK.
     
-    Primary data source: Executive Summary Report (accurate cash flow metrics).
-    
     This endpoint:
-    - Uses cache when available (unless force_refresh=true)
-    - Fetches Executive Summary for current month (cash position, cash spent/received, expenses)
-    - Fetches Executive Summary for historical months (for trend analysis)
+    - Uses cache when available (exact date range match only, unless force_refresh=true)
+    - Fetches Balance Sheets for current and prior dates
+    - Fetches P&L report for specified date range
     - Fetches Accounts Receivable invoices (for leading indicators)
     - Fetches Accounts Payable invoices (for leading indicators)
-    - Fetches Profit & Loss report (for AI narrative and expense analysis)
+    - Fetches Trial Balance for end_date (deterministic P&L via AccountType)
     
     Returns normalized data structure ready for cash runway calculations.
     """
@@ -413,6 +409,20 @@ async def sync_xero_data(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User has no organization",
+        )
+    
+    # Validate date range
+    if start_date >= end_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="start_date must be before end_date",
+        )
+    
+    today = date.today()
+    if end_date > today:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="end_date cannot be in the future",
         )
     
     try:
@@ -431,13 +441,18 @@ async def sync_xero_data(
         # Fetch all data (with caching)
         data = await data_fetcher.fetch_all_data(
             organization_id=current_user.organization.id,
-            months=months,
+            start_date=start_date,
+            end_date=end_date,
             force_refresh=force_refresh,
         )
         
+        # Calculate period description
+        days_diff = (end_date - start_date).days
+        period_description = f"{days_diff} days" if days_diff < 30 else f"{days_diff // 30} months"
+        
         return XeroSyncResponse(
             success=True,
-            message=f"Successfully fetched {months} months of financial data",
+            message=f"Successfully fetched financial data for period: {start_date} to {end_date} ({period_description})",
             data=data,
             fetched_at=data.get("fetched_at", ""),
         )

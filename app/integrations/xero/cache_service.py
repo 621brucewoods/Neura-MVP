@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.executive_summary_cache import ExecutiveSummaryCache
 from app.models.financial_cache import FinancialCache
+from app.models.profit_loss_cache import ProfitLossCache
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,53 @@ class CacheService:
         
         return month_ends
     
+    def calculate_month_ends_in_range(self, start_date: date, end_date: date) -> list[date]:
+        """
+        Calculate all month-end dates within a date range.
+        
+        Args:
+            start_date: Range start date
+            end_date: Range end date
+        
+        Returns:
+            List of month-end dates within the range (inclusive)
+        
+        Example:
+            start_date = 2025-07-15
+            end_date = 2026-01-06
+            Returns: [2025-07-31, 2025-08-31, 2025-09-30, 2025-10-31, 2025-11-30, 2025-12-31]
+        """
+        month_ends = []
+        
+        # Start from first month-end after or equal to start_date
+        current = start_date.replace(day=1)
+        if current.month == 12:
+            current = date(current.year + 1, 1, 1)
+        else:
+            current = date(current.year, current.month + 1, 1)
+        current = current - timedelta(days=1)  # Last day of start_date's month
+        
+        # If start_date is after month-end, move to next month
+        if start_date > current:
+            if current.month == 12:
+                current = date(current.year + 1, 1, 31)
+            else:
+                next_month = date(current.year, current.month + 1, 1)
+                current = next_month - timedelta(days=1)
+        
+        # Collect all month-ends up to end_date's month
+        while current <= end_date:
+            month_ends.append(current)
+            
+            # Move to next month-end
+            if current.month == 12:
+                current = date(current.year + 1, 1, 31)
+            else:
+                next_month = date(current.year, current.month + 1, 1)
+                current = next_month - timedelta(days=1)
+        
+        return month_ends
+    
     async def get_cached_executive_summary(
         self,
         organization_id: UUID,
@@ -110,18 +158,48 @@ class CacheService:
         
         return current_month_data, historical_map, missing_dates
     
+    async def get_cached_executive_summary_by_dates(
+        self,
+        organization_id: UUID,
+        month_end_dates: list[date],
+    ) -> dict[date, dict[str, Any]]:
+        """
+        Get cached Executive Summary data for specific month-end dates.
+        
+        Args:
+            organization_id: Organization UUID
+            month_end_dates: List of month-end dates to fetch
+        
+        Returns:
+            Dict mapping report_date -> cached data (only includes dates that exist in cache)
+        """
+        if not month_end_dates:
+            return {}
+        
+        stmt = (
+            select(ExecutiveSummaryCache)
+            .where(ExecutiveSummaryCache.organization_id == organization_id)
+            .where(ExecutiveSummaryCache.report_date.in_(month_end_dates))
+        )
+        result = await self.db.execute(stmt)
+        cached_historical = result.scalars().all()
+        
+        return {
+            item.report_date: item.to_dict() for item in cached_historical
+        }
+    
     async def get_cached_financial_data(
         self,
         organization_id: UUID,
     ) -> Optional[dict[str, Any]]:
         """
-        Get cached receivables/payables/P&L data.
+        Get cached receivables/payables data.
         
         Args:
             organization_id: Organization UUID
         
         Returns:
-            Dict with receivables, payables, profit_loss if fresh, else None
+            Dict with receivables, payables if fresh, else None
         """
         financial_cache = await self._get_financial_cache(organization_id)
         
@@ -129,10 +207,97 @@ class CacheService:
             return {
                 "invoices_receivable": financial_cache.invoices_receivable,
                 "invoices_payable": financial_cache.invoices_payable,
-                "profit_loss": financial_cache.profit_loss_data,
             }
         
         return None
+    
+    async def get_cached_profit_loss(
+        self,
+        organization_id: UUID,
+        start_date: date,
+        end_date: date,
+    ) -> Optional[dict[str, Any]]:
+        """
+        Get cached P&L data for exact date range match.
+        
+        Only returns cache if start_date and end_date match exactly.
+        If no exact match or expired, returns None.
+        
+        Args:
+            organization_id: Organization UUID
+            start_date: P&L period start date
+            end_date: P&L period end date
+        
+        Returns:
+            Cached P&L data if exact match and fresh, else None
+        """
+        stmt = (
+            select(ProfitLossCache)
+            .where(ProfitLossCache.organization_id == organization_id)
+            .where(ProfitLossCache.start_date == start_date)
+            .where(ProfitLossCache.end_date == end_date)
+        )
+        result = await self.db.execute(stmt)
+        cached = result.scalar_one_or_none()
+        
+        if cached and cached.is_fresh:
+            return cached.profit_loss_data
+        
+        return None
+    
+    async def save_profit_loss_cache(
+        self,
+        organization_id: UUID,
+        start_date: date,
+        end_date: date,
+        profit_loss_data: dict[str, Any],
+    ) -> None:
+        """
+        Save P&L data to cache.
+        
+        Args:
+            organization_id: Organization UUID
+            start_date: P&L period start date
+            end_date: P&L period end date
+            profit_loss_data: P&L report data to cache
+        """
+        now = datetime.now(timezone.utc)
+        expires_at = self._calculate_expires_at()
+        
+        # Check if exact range already exists
+        stmt = (
+            select(ProfitLossCache)
+            .where(ProfitLossCache.organization_id == organization_id)
+            .where(ProfitLossCache.start_date == start_date)
+            .where(ProfitLossCache.end_date == end_date)
+        )
+        result = await self.db.execute(stmt)
+        existing = result.scalar_one_or_none()
+        
+        if existing:
+            # Update existing
+            existing.profit_loss_data = profit_loss_data
+            existing.fetched_at = now
+            existing.expires_at = expires_at
+        else:
+            # Create new
+            new_cache = ProfitLossCache(
+                organization_id=organization_id,
+                start_date=start_date,
+                end_date=end_date,
+                profit_loss_data=profit_loss_data,
+                fetched_at=now,
+                expires_at=expires_at,
+            )
+            self.db.add(new_cache)
+        
+        await self.db.commit()
+        logger.info(
+            "Saved P&L cache for org %s: %s to %s",
+            organization_id,
+            start_date,
+            end_date,
+        )
     
     async def save_executive_summary_cache(
         self,
@@ -209,16 +374,14 @@ class CacheService:
         organization_id: UUID,
         receivables: dict[str, Any],
         payables: dict[str, Any],
-        profit_loss: dict[str, Any],
     ) -> None:
         """
-        Save receivables/payables/P&L to cache.
+        Save receivables/payables to cache.
         
         Args:
             organization_id: Organization UUID
             receivables: Receivables data
             payables: Payables data
-            profit_loss: Profit & Loss data
         """
         now = datetime.now(timezone.utc)
         expires_at = self._calculate_expires_at()
@@ -226,7 +389,6 @@ class CacheService:
         financial_cache = await self._get_or_create_financial_cache(organization_id)
         financial_cache.invoices_receivable = receivables
         financial_cache.invoices_payable = payables
-        financial_cache.profit_loss_data = profit_loss
         financial_cache.fetched_at = now
         financial_cache.expires_at = expires_at
         
@@ -255,6 +417,16 @@ class CacheService:
         result = await self.db.execute(stmt)
         historical_cache = result.scalars().all()
         for cache in historical_cache:
+            await self.db.delete(cache)
+        
+        # Delete all ProfitLossCache records
+        stmt = (
+            select(ProfitLossCache)
+            .where(ProfitLossCache.organization_id == organization_id)
+        )
+        result = await self.db.execute(stmt)
+        pnl_cache = result.scalars().all()
+        for cache in pnl_cache:
             await self.db.delete(cache)
         
         await self.db.commit()

@@ -386,43 +386,60 @@ class ProfitabilityCalculator:
         """
         Calculate all profitability metrics.
         
+        Strategy: Trial Balance is primary source (deterministic by AccountType).
+        P&L report is only used as fallback if Trial Balance unavailable.
+        
         Args:
-            profit_loss_data: P&L report data from XeroDataFetcher
+            profit_loss_data: P&L report data from XeroDataFetcher (fallback only)
+            trial_balance_pnl: Trial Balance P&L values (primary source)
             executive_summary_current: Current month Executive Summary
             executive_summary_history: Historical months
         
         Returns:
             Dictionary with profitability metrics
         """
-        pnl_values = ProfitabilityCalculator._extract_pnl_values(profit_loss_data)
-        logger.info("[Profitability] P&L extraction result: revenue=%s, cost_of_sales=%s, gross_profit=%s, expenses=%s, net_profit=%s",
-                    pnl_values.get("revenue"), pnl_values.get("cost_of_sales"), pnl_values.get("gross_profit"),
-                    pnl_values.get("expenses"), pnl_values.get("net_profit"))
+        # Initialize with None values
+        pnl_values = {
+            "revenue": None,
+            "cost_of_sales": None,
+            "expenses": None,
+            "gross_profit": None,
+            "net_profit": None,
+        }
         
-        # Merge with Trial Balance P&L if available (deterministic by AccountType)
+        # PRIMARY SOURCE: Trial Balance (deterministic by AccountType)
         if isinstance(trial_balance_pnl, dict):
-            logger.info("[Profitability] Trial Balance P&L available: %s", trial_balance_pnl)
+            logger.info("[Profitability] Using Trial Balance as primary source: %s", trial_balance_pnl)
             for key in ["revenue", "cost_of_sales", "expenses"]:
-                tb_value = trial_balance_pnl.get(key)
-                # Use Trial Balance value if it exists (including 0.0, which is valid)
-                # Only skip if the key doesn't exist in the dict (None from .get() when key missing)
                 if key in trial_balance_pnl:
-                    pnl_values[key] = tb_value
-                    logger.info("[Profitability] Using Trial Balance %s: %s (was: %s)", key, tb_value, pnl_values.get(key))
+                    pnl_values[key] = trial_balance_pnl[key]
+                    logger.info("[Profitability] Trial Balance %s: %s", key, pnl_values[key])
         else:
-            logger.warning("[Profitability] Trial Balance P&L not available or invalid: %s", type(trial_balance_pnl))
+            logger.warning("[Profitability] Trial Balance P&L not available, falling back to P&L report")
+            # FALLBACK: Use P&L report if Trial Balance unavailable
+            pnl_extracted = ProfitabilityCalculator._extract_pnl_values(profit_loss_data)
+            logger.info("[Profitability] P&L extraction (fallback): revenue=%s, cost_of_sales=%s, expenses=%s",
+                        pnl_extracted.get("revenue"), pnl_extracted.get("cost_of_sales"), pnl_extracted.get("expenses"))
+            pnl_values["revenue"] = pnl_extracted.get("revenue")
+            pnl_values["cost_of_sales"] = pnl_extracted.get("cost_of_sales")
+            pnl_values["expenses"] = pnl_extracted.get("expenses")
         
-        # Derive missing gross_profit and net_profit using math (deterministic)
-        if pnl_values.get("gross_profit") is None:
-            if pnl_values.get("revenue") is not None and pnl_values.get("cost_of_sales") is not None:
-                pnl_values["gross_profit"] = pnl_values["revenue"] - pnl_values["cost_of_sales"]
+        # ALWAYS calculate gross_profit from revenue and cost_of_sales (deterministic)
+        if pnl_values.get("revenue") is not None and pnl_values.get("cost_of_sales") is not None:
+            pnl_values["gross_profit"] = pnl_values["revenue"] - pnl_values["cost_of_sales"]
+            logger.info("[Profitability] Calculated gross_profit: %s - %s = %s",
+                        pnl_values["revenue"], pnl_values["cost_of_sales"], pnl_values["gross_profit"])
         
-        if pnl_values.get("net_profit") is None:
-            if pnl_values.get("gross_profit") is not None and pnl_values.get("expenses") is not None:
-                pnl_values["net_profit"] = pnl_values["gross_profit"] - pnl_values["expenses"]
-            elif pnl_values.get("revenue") is not None and pnl_values.get("expenses") is not None:
-                # Fallback: revenue minus expenses if cost_of_sales missing
-                pnl_values["net_profit"] = pnl_values["revenue"] - pnl_values["expenses"]
+        # ALWAYS calculate net_profit from gross_profit and expenses (deterministic)
+        if pnl_values.get("gross_profit") is not None and pnl_values.get("expenses") is not None:
+            pnl_values["net_profit"] = pnl_values["gross_profit"] - pnl_values["expenses"]
+            logger.info("[Profitability] Calculated net_profit: %s - %s = %s",
+                        pnl_values["gross_profit"], pnl_values["expenses"], pnl_values["net_profit"])
+        elif pnl_values.get("revenue") is not None and pnl_values.get("expenses") is not None:
+            # Fallback: revenue minus expenses if cost_of_sales missing
+            pnl_values["net_profit"] = pnl_values["revenue"] - pnl_values["expenses"]
+            logger.info("[Profitability] Calculated net_profit (fallback): %s - %s = %s",
+                        pnl_values["revenue"], pnl_values["expenses"], pnl_values["net_profit"])
         
         gross_margin = ProfitabilityCalculator.calculate_gross_margin(
             revenue=pnl_values["revenue"],

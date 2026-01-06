@@ -918,42 +918,47 @@ class XeroDataFetcher:
     async def fetch_all_data(
         self, 
         organization_id: Optional[UUID] = None,
-        months: int = 6, 
+        start_date: date = None,
+        end_date: date = None,
         force_refresh: bool = False
     ) -> dict[str, Any]:
         """
         Orchestrates fetching of all required financial data.
         
         Strategy:
-        1. Fetch Balance Sheet for Today (Current Cash)
-        2. Fetch Balance Sheet for T-30 Days (For Burn Rate Delta)
-        3. Fetch P&L for specified months period (Profitability)
+        1. Fetch Balance Sheet for end_date (Current Cash)
+        2. Fetch Balance Sheet for 30 days before end_date (For Burn Rate Delta)
+        3. Fetch P&L for specified date range (Profitability) - exact match cache only
         4. Fetch Receivables/Payables (Leading Indicators)
+        5. Fetch Trial Balance for end_date (deterministic P&L via AccountType)
         
         Args:
-            organization_id: Organization UUID (required for caching, reserved for future use)
-            months: Number of historical months to fetch for P&L (1-12, default: 6)
-            force_refresh: If True, bypass cache and fetch fresh data (reserved for future use)
+            organization_id: Organization UUID
+            start_date: P&L period start date
+            end_date: P&L period end date
+            force_refresh: If True, bypass cache and fetch fresh data
         
         Returns:
             Complete financial data structure
         """
         try:
             errors = []
-            today = datetime.now(timezone.utc).date()
             
-            # Note: organization_id and force_refresh are reserved for future caching implementation
-            _ = organization_id, force_refresh
+            if not start_date or not end_date:
+                raise ValueError("start_date and end_date are required")
             
-            # Use simple 30 day lookback for "Previous Month" comparison
-            prior_date = today - timedelta(days=30)
+            if start_date >= end_date:
+                raise ValueError("start_date must be before end_date")
+            
+            # Use 30 day lookback for prior Balance Sheet
+            prior_date = end_date - timedelta(days=30)
             
             # 1. Fetch Balance Sheets (Current & Prior for Delta Calc)
             balance_sheet_current = None
             balance_sheet_prior = None
             
             try:
-                balance_sheet_current = await self.fetch_balance_sheet(today)
+                balance_sheet_current = await self.fetch_balance_sheet(end_date)
             except XeroDataFetchError as e:
                 errors.append(f"Balance Sheet (current): {e.message}")
                 balance_sheet_current = {}
@@ -964,28 +969,59 @@ class XeroDataFetcher:
                 errors.append(f"Balance Sheet (prior): {e.message}")
                 balance_sheet_prior = {}
             
-            # 2. Fetch P&L for specified months period
+            # 2. Fetch P&L for specified date range (with exact match cache)
             profit_loss = None
             try:
-                # Calculate date range: months months back from today
-                # Example: If months=3 and today is Jan 6, 2026, fetch from Oct 6, 2025 to Jan 6, 2026
-                start_date = self._calculate_months_ago(today, months)
-                
-                profit_loss = await self.fetch_profit_loss(
-                    start_date=start_date,
-                    end_date=today
-                )
-                logger.info(
-                    "Fetched P&L for period: %s to %s (%s months)",
-                    start_date,
-                    today,
-                    months
-                )
+                if not force_refresh and self.cache_service:
+                    # Check cache for exact match
+                    cached_pnl = await self.cache_service.get_cached_profit_loss(
+                        organization_id, start_date, end_date
+                    )
+                    if cached_pnl:
+                        logger.info(
+                            "Using cached P&L for period: %s to %s",
+                            start_date,
+                            end_date
+                        )
+                        profit_loss = cached_pnl
+                    else:
+                        # No exact match - fetch fresh
+                        profit_loss = await self.fetch_profit_loss(
+                            start_date=start_date,
+                            end_date=end_date
+                        )
+                        # Save to cache
+                        if self.cache_service:
+                            await self.cache_service.save_profit_loss_cache(
+                                organization_id, start_date, end_date, profit_loss
+                            )
+                        logger.info(
+                            "Fetched P&L for period: %s to %s",
+                            start_date,
+                            end_date
+                        )
+                else:
+                    # Force refresh or no cache service - fetch fresh
+                    profit_loss = await self.fetch_profit_loss(
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+                    # Save to cache if available
+                    if self.cache_service and not force_refresh:
+                        await self.cache_service.save_profit_loss_cache(
+                            organization_id, start_date, end_date, profit_loss
+                        )
+                    logger.info(
+                        "Fetched P&L for period: %s to %s (force_refresh=%s)",
+                        start_date,
+                        end_date,
+                        force_refresh
+                    )
             except XeroDataFetchError as e:
                 errors.append(f"Profit & Loss: {e.message}")
                 profit_loss = {}
             
-            # 3. Fetch Accounts (for AccountType mapping) and Trial Balance (deterministic P&L via AccountType)
+            # 3. Fetch Accounts (for AccountType mapping) and Trial Balance
             accounts_map = {}
             trial_balance = {}
             trial_balance_pnl = {}
@@ -998,15 +1034,9 @@ class XeroDataFetcher:
                 accounts_map = {}
             
             try:
-                # Calculate P&L period start date
-                start_date = self._calculate_months_ago(today, months)
-                
-                # Fetch Trial Balance for end date (period end)
-                # Note: Trial Balance is a snapshot, so we get balances at end_date
-                # For period-based P&L, we'd ideally need start and end, but for MVP
-                # we'll use end_date snapshot which shows cumulative balances
-                trial_balance = await self.fetch_trial_balance(today)
-                logger.info("Fetched Trial Balance for date: %s", today)
+                # Fetch Trial Balance for end_date (period end snapshot)
+                trial_balance = await self.fetch_trial_balance(end_date)
+                logger.info("Fetched Trial Balance for date: %s", end_date)
                 
                 if accounts_map:
                     trial_balance_pnl = self.extract_pnl_from_trial_balance(trial_balance, accounts_map)
@@ -1025,7 +1055,7 @@ class XeroDataFetcher:
                 trial_balance = {}
                 trial_balance_pnl = {}
             
-            # 3. Fetch Invoices (Receivables/Payables)
+            # 4. Fetch Invoices (Receivables/Payables)
             receivables = None
             payables = None
             
@@ -1061,7 +1091,7 @@ class XeroDataFetcher:
             if errors:
                 logger.warning("Some data fetch operations failed: %s", ", ".join(errors))
             
-            # 4. Compile Data Package
+            # 5. Compile Data Package
             return {
                 "balance_sheet_current": balance_sheet_current,
                 "balance_sheet_prior": balance_sheet_prior,

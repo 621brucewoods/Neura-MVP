@@ -4,9 +4,9 @@ API endpoints for financial insights and calculations.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.auth.dependencies import get_current_user
 from app.database.connection import get_async_session
@@ -31,15 +31,16 @@ router = APIRouter(prefix="/api/insights", tags=["Insights"])
 )
 async def get_insights(
     current_user: User = Depends(get_current_user),
-    months: int = 6,
-    force_refresh: bool = False,
+    start_date: date = Query(..., description="Start date for P&L period (YYYY-MM-DD)"),
+    end_date: date = Query(..., description="End date for P&L period (YYYY-MM-DD)"),
+    force_refresh: bool = Query(default=False, description="Force refresh, bypass cache"),
     db: AsyncSession = Depends(get_async_session),
 ) -> InsightsResponse:
     """
     Calculate and return all financial insights.
     
     This endpoint:
-    - Uses cached data when available (unless force_refresh=true)
+    - Uses cached data when available (exact date range match only, unless force_refresh=true)
     - Fetches financial data from Xero (or cache)
     - Calculates cash runway metrics
     - Analyzes cash flow trends
@@ -51,6 +52,20 @@ async def get_insights(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User has no organization",
+        )
+    
+    # Validate date range
+    if start_date >= end_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="start_date must be before end_date",
+        )
+    
+    today = datetime.now(timezone.utc).date()
+    if end_date > today:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="end_date cannot be in the future",
         )
     
     try:
@@ -69,7 +84,8 @@ async def get_insights(
         # Fetch all data (with caching)
         financial_data = await data_fetcher.fetch_all_data(
             organization_id=current_user.organization.id,
-            months=months,
+            start_date=start_date,
+            end_date=end_date,
             force_refresh=force_refresh,
         )
         

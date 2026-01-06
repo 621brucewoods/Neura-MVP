@@ -30,6 +30,7 @@ from app.models import (
     FinancialCache,
     CalculatedMetrics,
     ExecutiveSummaryCache,
+    ProfitLossCache,
     LoginAttempt,
     RefreshToken,
     TokenBlacklist,
