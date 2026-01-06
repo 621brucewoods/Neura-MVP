@@ -35,7 +35,7 @@ class XeroConnectionStatus(BaseModel):
     )
     status: str = Field(
         ...,
-        description="Connection status (active, disconnected, expired, refresh_failed)"
+        description="Connection status (active, disconnected, expired, refresh_failed, invalid_token)"
     )
     xero_tenant_id: Optional[str] = Field(
         None,
@@ -56,6 +56,14 @@ class XeroConnectionStatus(BaseModel):
     needs_refresh: bool = Field(
         False,
         description="Whether token needs refresh soon"
+    )
+    needs_reconnect: bool = Field(
+        False,
+        description="Whether user needs to reconnect Xero (token is invalid)"
+    )
+    error_message: Optional[str] = Field(
+        None,
+        description="Error message if reconnection is needed"
     )
 
 

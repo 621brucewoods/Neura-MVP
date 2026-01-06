@@ -553,6 +553,8 @@ class XeroDataFetcher:
             if executive_summary_current is None:
                 try:
                     executive_summary_current = await self.fetch_executive_summary()
+                    # Commit token updates immediately after API call (SDK may have refreshed)
+                    await self.client.commit_token_updates()
                 except XeroDataFetchError as e:
                     errors.append(f"Executive Summary (current): {e.message}")
                     executive_summary_current = {
@@ -572,6 +574,8 @@ class XeroDataFetcher:
                     for missing_date in executive_summary_history_missing:
                         month_data = await self.fetch_executive_summary(report_date=missing_date)
                         executive_summary_history_fetched.append(month_data)
+                        # Commit token updates after each API call
+                        await self.client.commit_token_updates()
                 except Exception as e:
                     errors.append(f"Executive Summary (history): {str(e)}")
             
@@ -585,6 +589,8 @@ class XeroDataFetcher:
             if receivables is None:
                 try:
                     receivables = await self.fetch_receivables()
+                    # Commit token updates immediately after API call
+                    await self.client.commit_token_updates()
                 except XeroDataFetchError as e:
                     errors.append(f"Receivables: {e.message}")
                     receivables = {
@@ -600,6 +606,8 @@ class XeroDataFetcher:
             if payables is None:
                 try:
                     payables = await self.fetch_payables()
+                    # Commit token updates immediately after API call
+                    await self.client.commit_token_updates()
                 except XeroDataFetchError as e:
                     errors.append(f"Payables: {e.message}")
                     payables = {
@@ -613,7 +621,20 @@ class XeroDataFetcher:
             
             # Fetch P&L if not cached
             if profit_loss is None:
-                profit_loss = await self.fetch_profit_loss(months=3)
+                try:
+                    profit_loss = await self.fetch_profit_loss(months=3)
+                    # Commit token updates immediately after API call
+                    await self.client.commit_token_updates()
+                except Exception as e:
+                    # P&L is optional, log but don't fail
+                    logger.warning(f"Failed to fetch P&L: {e}")
+                    profit_loss = {
+                        "report_id": None,
+                        "report_name": "Profit and Loss",
+                        "report_date": None,
+                        "raw_data": None,
+                        "error": str(e),
+                    }
             
             # Save to cache if we fetched new data
             if use_cache and organization_id:
@@ -641,6 +662,7 @@ class XeroDataFetcher:
             if errors:
                 logger.warning("Some data fetch operations failed: %s", ", ".join(errors))
             
+            # Final commit to ensure all token updates are saved
             await self.client.commit_token_updates()
             
             return {

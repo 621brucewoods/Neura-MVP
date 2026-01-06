@@ -26,6 +26,7 @@ from app.integrations.xero.service import XeroService
 from app.integrations.xero.state_store import oauth_state_store
 from app.models.organization import Organization
 from app.models.user import User
+from app.models.xero_token import XeroConnectionStatus as TokenStatusEnum
 
 
 router = APIRouter(prefix="/integrations/xero", tags=["Xero Integration"])
@@ -167,7 +168,7 @@ async def xero_callback(
     "/status",
     response_model=XeroConnectionStatus,
     summary="Get Xero connection status",
-    description="Check if Xero is connected and get connection details.",
+    description="Check if Xero is connected and get connection details. Validates token with Xero API.",
 )
 async def get_xero_status(
     current_user: User = Depends(get_current_user),
@@ -175,12 +176,15 @@ async def get_xero_status(
 ) -> XeroConnectionStatus:
     """
     Get current Xero connection status for the user's organization.
+    
+    Actually validates the token with Xero API to ensure accuracy.
     """
     if not current_user.organization:
         return XeroConnectionStatus(
             is_connected=False,
             status="no_organization",
             needs_refresh=False,
+            needs_reconnect=False,
         )
     
     token = await xero_service.get_token_by_organization(
@@ -192,17 +196,86 @@ async def get_xero_status(
             is_connected=False,
             status="disconnected",
             needs_refresh=False,
+            needs_reconnect=False,
         )
     
-    return XeroConnectionStatus(
-        is_connected=token.is_active,
-        status=token.status,
-        xero_tenant_id=token.xero_tenant_id,
-        connected_at=token.created_at,
-        expires_at=token.expires_at,
-        last_refreshed_at=token.last_refreshed_at,
-        needs_refresh=token.needs_refresh,
-    )
+    # If explicitly disconnected, return immediately
+    if token.status == "disconnected":
+        return XeroConnectionStatus(
+            is_connected=False,
+            status="disconnected",
+            xero_tenant_id=token.xero_tenant_id,
+            connected_at=token.created_at,
+            expires_at=token.expires_at,
+            last_refreshed_at=token.last_refreshed_at,
+            needs_refresh=False,
+            needs_reconnect=True,
+            error_message="Xero connection was disconnected. Please reconnect.",
+        )
+    
+    # Validate token by attempting a refresh or checking connections
+    # This ensures we return accurate status, not just database state
+    try:
+        # Try to refresh the token to validate it's still valid
+        # This is the most reliable way to check if refresh_token is valid
+        token_response = await xero_oauth.refresh_tokens(token.refresh_token)
+        
+        # Refresh succeeded - token is valid
+        # Update token in database with new values
+        token_data = XeroTokenData(
+            access_token=token_response["access_token"],
+            refresh_token=token_response["refresh_token"],
+            expires_at=XeroOAuth.calculate_expiry(token_response["expires_in"]),
+            xero_tenant_id=token.xero_tenant_id,
+            scope=token_response.get("scope", token.scope),
+            id_token=token_response.get("id_token"),
+        )
+        updated_token = await xero_service.update_token(token, token_data)
+        
+        return XeroConnectionStatus(
+            is_connected=True,
+            status="active",
+            xero_tenant_id=updated_token.xero_tenant_id,
+            connected_at=updated_token.created_at,
+            expires_at=updated_token.expires_at,
+            last_refreshed_at=updated_token.last_refreshed_at,
+            needs_refresh=updated_token.needs_refresh,
+            needs_reconnect=False,
+        )
+        
+    except XeroOAuthError as e:
+        # Refresh failed - token is invalid
+        # Check if it's invalid_grant (token expired/revoked) vs other error
+        if e.error_code == "invalid_grant":
+            # Mark token as invalid in database
+            token.status = TokenStatusEnum.REFRESH_FAILED.value
+            token.last_error = e.message
+            await xero_service.db.commit()
+            
+            return XeroConnectionStatus(
+                is_connected=False,
+                status="invalid_token",
+                xero_tenant_id=token.xero_tenant_id,
+                connected_at=token.created_at,
+                expires_at=token.expires_at,
+                last_refreshed_at=token.last_refreshed_at,
+                needs_refresh=False,
+                needs_reconnect=True,
+                error_message="Xero connection token is invalid. Please reconnect your Xero account.",
+            )
+        else:
+            # Other error (network, etc.) - don't mark as invalid, just return current status
+            return XeroConnectionStatus(
+                is_connected=token.is_active,
+                status=token.status,
+                xero_tenant_id=token.xero_tenant_id,
+                connected_at=token.created_at,
+                expires_at=token.expires_at,
+                last_refreshed_at=token.last_refreshed_at,
+                needs_refresh=token.needs_refresh,
+                needs_reconnect=False,
+                error_message=f"Unable to validate connection: {e.message}",
+            )
 
 
 @router.post(

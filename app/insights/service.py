@@ -6,12 +6,14 @@ Orchestrates calculation of financial insights from Xero data.
 import logging
 from typing import Any, Optional
 
-from app.insights.calculator import (
+from app.insights.cash_calculators import (
     CashRunwayCalculator,
-    TrendAnalyzer,
-    LeadingIndicatorsCalculator,
     CashPressureCalculator,
-    ProfitabilityCalculator,
+)
+from app.insights.trend_analyzer import TrendAnalyzer
+from app.insights.profitability_calculator import ProfitabilityCalculator
+from app.insights.indicators_calculator import (
+    LeadingIndicatorsCalculator,
     UpcomingCommitmentsCalculator,
 )
 
@@ -114,6 +116,7 @@ class InsightsService:
             runway_months=cash_runway.get("runway_months"),
             runway_status=cash_runway.get("status"),
             revenue_volatility=trends.get("revenue_volatility"),
+            cash_position=cash_runway.get("current_cash"),
         )
     
     @staticmethod
