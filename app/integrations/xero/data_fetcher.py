@@ -492,6 +492,74 @@ class XeroDataFetcher:
             logger.error("Xero API Error (Trial Balance): %s", e)
             raise XeroDataFetchError(f"Failed to fetch Trial Balance: {e}", status_code=e.status) from e
     
+    def _extract_account_id_from_cell(self, cell: dict) -> Optional[str]:
+        """Extract AccountID from cell attributes."""
+        if not isinstance(cell, dict):
+            return None
+
+        attributes = cell.get("Attributes", cell.get("attributes", []))
+        if not isinstance(attributes, list):
+            return None
+
+        for attr in attributes:
+            if not isinstance(attr, dict):
+                continue
+            attr_id = attr.get("id", attr.get("Id", ""))
+            if attr_id == "account":
+                return attr.get("value", attr.get("Value", ""))
+
+        return None
+
+    def _process_trial_balance_rows(
+        self,
+        rows_list: list,
+        account_type_map: dict[str, str],
+        totals: dict[str, Decimal]
+    ) -> None:
+        """Recursively process Trial Balance rows to extract account balances by AccountType."""
+        if not isinstance(rows_list, list):
+            return
+
+        account_type_to_key = {
+            "REVENUE": "revenue",
+            "COGS": "cost_of_sales",
+            "EXPENSE": "expenses",
+        }
+
+        for row in rows_list:
+            if not isinstance(row, dict):
+                continue
+
+            row_type = row.get("RowType", row.get("row_type", ""))
+            if row_type != "Row":
+                nested_rows = row.get("Rows", row.get("rows", []))
+                if nested_rows:
+                    self._process_trial_balance_rows(nested_rows, account_type_map, totals)
+                continue
+
+            cells = row.get("Cells", row.get("cells", []))
+            if not isinstance(cells, list) or len(cells) < 2:
+                continue
+
+            account_id = self._extract_account_id_from_cell(cells[0])
+            if not account_id:
+                continue
+
+            account_type = account_type_map.get(account_id)
+            if not account_type:
+                continue
+
+            value_cell = cells[1]
+            if not isinstance(value_cell, dict):
+                continue
+
+            value_str = value_cell.get("Value", value_cell.get("value", "0"))
+            value = self._parse_currency_value(value_str, "0.00")
+
+            account_type_key = account_type_to_key.get(account_type.upper())
+            if account_type_key:
+                totals[account_type_key] += value
+
     def extract_pnl_from_trial_balance(
         self,
         trial_balance: dict[str, Any],
@@ -500,133 +568,32 @@ class XeroDataFetcher:
         """
         Extract P&L values from Trial Balance using AccountType mapping.
         
-        This method is deterministic - it uses fixed AccountType (REVENUE, EXPENSE, COGS)
-        rather than user-defined labels, making it reliable across all organizations.
-        
-        Args:
-            trial_balance: Trial Balance report data from fetch_trial_balance()
-            account_type_map: AccountID -> AccountType mapping from fetch_accounts()
-            
-        Returns:
-            Dictionary with extracted values: revenue, cost_of_sales, expenses
-            Note: Gross Profit and Net Profit are calculated, not extracted
+        Deterministic method using fixed AccountType (REVENUE, EXPENSE, COGS).
+        Gross profit and net profit are calculated, not extracted.
         """
         if not trial_balance or not trial_balance.get("raw_data"):
-            return {
-                "revenue": None,
-                "cost_of_sales": None,
-                "expenses": None,
-            }
-        
+            return {"revenue": None, "cost_of_sales": None, "expenses": None}
+
         raw_data = trial_balance.get("raw_data", {})
         if not isinstance(raw_data, dict):
-            return {
-                "revenue": None,
-                "cost_of_sales": None,
-                "expenses": None,
-            }
-        
-        # Extract rows from trial balance
+            return {"revenue": None, "cost_of_sales": None, "expenses": None}
+
         rows = raw_data.get("Rows", raw_data.get("rows", []))
         if not isinstance(rows, list):
             rows = []
-        
-        # Initialize totals (using list to allow modification in nested function)
+
         totals = {
             "revenue": Decimal("0.00"),
             "cost_of_sales": Decimal("0.00"),
             "expenses": Decimal("0.00"),
         }
-        
-        def _process_rows(rows_list: list):
-            """Recursively process rows to extract account balances."""
-            if not isinstance(rows_list, list):
-                return
-            
-            for row in rows_list:
-                if not isinstance(row, dict):
-                    continue
-                
-                row_type = row.get("RowType", row.get("row_type", ""))
-                
-                # Only process Row types (not Header, Section, SummaryRow)
-                if row_type != "Row":
-                    # Recursively process nested rows
-                    nested_rows = row.get("Rows", row.get("rows", []))
-                    if nested_rows:
-                        _process_rows(nested_rows)
-                    continue
-                
-                # Extract cells
-                cells = row.get("Cells", row.get("cells", []))
-                if not isinstance(cells, list) or len(cells) < 2:
-                    continue
-                
-                # First cell contains account info with AccountID in attributes
-                first_cell = cells[0]
-                if not isinstance(first_cell, dict):
-                    continue
-                
-                # Extract AccountID from attributes
-                attributes = first_cell.get("Attributes", first_cell.get("attributes", []))
-                account_id = None
-                
-                if isinstance(attributes, list):
-                    for attr in attributes:
-                        if isinstance(attr, dict):
-                            attr_id = attr.get("id", attr.get("Id", ""))
-                            if attr_id == "account":
-                                account_id = attr.get("value", attr.get("Value", ""))
-                                break
-                
-                if not account_id:
-                    continue
-                
-                # Look up AccountType
-                account_type = account_type_map.get(account_id)
-                if not account_type:
-                    continue
-                
-                # Extract value from second cell (balance)
-                value_cell = cells[1]
-                if not isinstance(value_cell, dict):
-                    continue
-                
-                value_str = value_cell.get("Value", value_cell.get("value", "0"))
-                value = self._parse_currency_value(value_str, "0.00")
-                
-                # Sum by AccountType (case-insensitive matching)
-                account_type_upper = account_type.upper()
-                if account_type_upper == "REVENUE":
-                    totals["revenue"] += value
-                    logger.debug("Found REVENUE account %s: %s", account_id, float(value))
-                elif account_type_upper == "COGS":
-                    totals["cost_of_sales"] += value
-                    logger.debug("Found COGS account %s: %s", account_id, float(value))
-                elif account_type_upper == "EXPENSE":
-                    totals["expenses"] += value
-                    logger.debug("Found EXPENSE account %s: %s", account_id, float(value))
-        
-        _process_rows(rows)
-        
-        total_revenue = totals["revenue"]
-        total_cost_of_sales = totals["cost_of_sales"]
-        total_expenses = totals["expenses"]
-        
-        logger.info(
-            "Extracted from Trial Balance: Revenue=%s, Cost of Sales=%s, Expenses=%s (from %s accounts mapped)",
-            float(total_revenue),
-            float(total_cost_of_sales),
-            float(total_expenses),
-            len(account_type_map)
-        )
-        
-        # Return values (0.0 is valid, only return None if we couldn't process)
-        # If we processed rows but got 0, that's a valid result
+
+        self._process_trial_balance_rows(rows, account_type_map, totals)
+
         return {
-            "revenue": float(total_revenue),
-            "cost_of_sales": float(total_cost_of_sales),
-            "expenses": float(total_expenses),
+            "revenue": float(totals["revenue"]),
+            "cost_of_sales": float(totals["cost_of_sales"]),
+            "expenses": float(totals["expenses"]),
         }
     
     async def fetch_profit_loss(self, start_date: date, end_date: date) -> dict[str, Any]:
@@ -1011,12 +978,6 @@ class XeroDataFetcher:
                         await self.cache_service.save_profit_loss_cache(
                             organization_id, start_date, end_date, profit_loss
                         )
-                    logger.info(
-                        "Fetched P&L for period: %s to %s (force_refresh=%s)",
-                        start_date,
-                        end_date,
-                        force_refresh
-                    )
             except XeroDataFetchError as e:
                 errors.append(f"Profit & Loss: {e.message}")
                 profit_loss = {}
@@ -1027,25 +988,16 @@ class XeroDataFetcher:
             trial_balance_pnl = {}
             try:
                 accounts_map = await self.fetch_accounts()
-                logger.info("Fetched %s accounts for AccountType mapping", len(accounts_map))
             except XeroDataFetchError as e:
                 errors.append(f"Accounts: {e.message}")
                 logger.warning("Failed to fetch accounts: %s", e.message)
                 accounts_map = {}
             
             try:
-                # Fetch Trial Balance for end_date (period end snapshot)
                 trial_balance = await self.fetch_trial_balance(end_date)
-                logger.info("Fetched Trial Balance for date: %s", end_date)
                 
                 if accounts_map:
                     trial_balance_pnl = self.extract_pnl_from_trial_balance(trial_balance, accounts_map)
-                    logger.info(
-                        "Trial Balance P&L extraction result: revenue=%s, cost_of_sales=%s, expenses=%s",
-                        trial_balance_pnl.get("revenue"),
-                        trial_balance_pnl.get("cost_of_sales"),
-                        trial_balance_pnl.get("expenses")
-                    )
                 else:
                     logger.warning("Cannot extract Trial Balance P&L: account_type_map is empty")
                     trial_balance_pnl = {}
