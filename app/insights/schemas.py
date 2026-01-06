@@ -115,4 +115,5 @@ class InsightsResponse(BaseModel):
     profitability: ProfitabilityMetrics = Field(..., description="Profitability analysis")
     upcoming_commitments: UpcomingCommitmentsMetrics = Field(..., description="Upcoming cash commitments")
     calculated_at: str = Field(..., description="ISO timestamp when insights were calculated")
+    raw_data_summary: dict[str, Any] = Field(..., description="Compact summary of raw financial data for AI analysis")
 

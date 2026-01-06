@@ -16,6 +16,7 @@ from app.integrations.xero.sdk_client import create_xero_sdk_client, XeroSDKClie
 from app.models.user import User
 from app.insights.service import InsightsService
 from app.insights.schemas import InsightsResponse
+from app.insights.data_summarizer import DataSummarizer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,9 @@ async def get_insights(
         # Calculate insights from fetched data
         insights = InsightsService.calculate_all_insights(financial_data, data_fetcher)
         
+        # Create compact summary of raw data for AI analysis
+        raw_data_summary = DataSummarizer.summarize(financial_data, start_date, end_date, data_fetcher)
+        
         return InsightsResponse(
             cash_runway=insights["cash_runway"],
             trends=insights["trends"],
@@ -100,6 +104,7 @@ async def get_insights(
             profitability=insights["profitability"],
             upcoming_commitments=insights["upcoming_commitments"],
             calculated_at=datetime.now(timezone.utc).isoformat(),
+            raw_data_summary=raw_data_summary,
         )
         
     except XeroSDKClientError as e:
