@@ -13,6 +13,10 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Token limits (conservative estimates)
+MAX_INPUT_TOKENS = 100000  # Leave room for output (~28k tokens)
+TOKENS_PER_CHAR = 0.25  # Rough estimate: ~4 chars = 1 token
+
 
 class AIInsightService:
     """Service for generating insights using OpenAI."""
@@ -48,8 +52,22 @@ class AIInsightService:
             ValueError: If API response is invalid
             Exception: If API call fails
         """
-        prompt = self._build_prompt(metrics, raw_data_summary, start_date, end_date)
+        # Truncate summary if needed to stay within token limits
+        truncated_summary = self._truncate_summary_if_needed(raw_data_summary)
+        
+        prompt = self._build_prompt(metrics, truncated_summary, start_date, end_date)
         schema = self._get_json_schema()
+        
+        # Log token usage estimate
+        estimated_tokens = self._estimate_tokens(prompt)
+        if estimated_tokens > MAX_INPUT_TOKENS:
+            logger.warning(
+                "Estimated tokens (%d) exceed limit (%d) even after truncation",
+                estimated_tokens,
+                MAX_INPUT_TOKENS,
+            )
+        else:
+            logger.info("Estimated input tokens: %d", estimated_tokens)
         
         try:
             response = self.client.chat.completions.create(
@@ -288,4 +306,130 @@ All fields are required, but supporting_numbers can be [] and data_notes can be 
             validated.append(insight)
         
         return validated
+    
+    def _estimate_tokens(self, text: str) -> int:
+        """
+        Estimate token count for text.
+        
+        Rough estimate: ~4 characters = 1 token.
+        More accurate for English text.
+        
+        Args:
+            text: Text to estimate
+        
+        Returns:
+            Estimated token count
+        """
+        return int(len(text) * TOKENS_PER_CHAR)
+    
+    def _truncate_summary_if_needed(self, summary: dict[str, Any]) -> dict[str, Any]:
+        """
+        Truncate raw data summary if it's too large.
+        
+        Intelligently reduces size while preserving important information:
+        - Limits invoice lists to top N items
+        - Limits report rows
+        - Preserves key metrics and totals
+        
+        Args:
+            summary: Raw data summary dictionary
+        
+        Returns:
+            Truncated summary dictionary
+        """
+        # Estimate current size
+        summary_json = json.dumps(summary)
+        estimated_tokens = self._estimate_tokens(summary_json)
+        
+        if estimated_tokens <= MAX_INPUT_TOKENS * 0.8:  # 80% threshold
+            return summary
+        
+        logger.info(
+            "Summary too large (%d estimated tokens), truncating...",
+            estimated_tokens,
+        )
+        
+        truncated = summary.copy()
+        
+        # Truncate receivables invoices (keep top 20 by amount/overdue)
+        if "receivables" in truncated and isinstance(truncated["receivables"], dict):
+            invoices = truncated["receivables"].get("invoices", [])
+            if isinstance(invoices, list) and len(invoices) > 20:
+                # Sort by overdue amount (descending) and take top 20
+                sorted_invoices = sorted(
+                    invoices,
+                    key=lambda x: x.get("overdue_amount", 0) or x.get("amount", 0),
+                    reverse=True,
+                )
+                truncated["receivables"]["invoices"] = sorted_invoices[:20]
+                logger.debug("Truncated receivables invoices from %d to 20", len(invoices))
+        
+        # Truncate payables invoices (keep top 20 by amount/overdue)
+        if "payables" in truncated and isinstance(truncated["payables"], dict):
+            invoices = truncated["payables"].get("invoices", [])
+            if isinstance(invoices, list) and len(invoices) > 20:
+                # Sort by amount (descending) and take top 20
+                sorted_invoices = sorted(
+                    invoices,
+                    key=lambda x: x.get("amount", 0) or 0,
+                    reverse=True,
+                )
+                truncated["payables"]["invoices"] = sorted_invoices[:20]
+                logger.debug("Truncated payables invoices from %d to 20", len(invoices))
+        
+        # Truncate report structures (limit rows)
+        for report_key in ["balance_sheet_current", "balance_sheet_prior", "profit_loss", "trial_balance"]:
+            if report_key in truncated and isinstance(truncated[report_key], dict):
+                truncated[report_key] = self._truncate_report_structure(
+                    truncated[report_key],
+                    max_rows=30,
+                )
+        
+        # Truncate accounts list if too large
+        if "accounts" in truncated and isinstance(truncated["accounts"], list):
+            if len(truncated["accounts"]) > 50:
+                truncated["accounts"] = truncated["accounts"][:50]
+                logger.debug("Truncated accounts from %d to 50", len(truncated["accounts"]))
+        
+        # Re-estimate after truncation
+        truncated_json = json.dumps(truncated)
+        new_estimated_tokens = self._estimate_tokens(truncated_json)
+        logger.info(
+            "After truncation: %d estimated tokens (reduced from %d)",
+            new_estimated_tokens,
+            estimated_tokens,
+        )
+        
+        return truncated
+    
+    def _truncate_report_structure(
+        self,
+        report: dict[str, Any],
+        max_rows: int = 30,
+    ) -> dict[str, Any]:
+        """
+        Truncate report structure by limiting rows.
+        
+        Args:
+            report: Report structure dictionary
+            max_rows: Maximum rows to keep
+        
+        Returns:
+            Truncated report structure
+        """
+        if not isinstance(report, dict):
+            return report
+        
+        truncated = report.copy()
+        
+        # If report has rows/rows_list, limit them
+        if "rows" in truncated and isinstance(truncated["rows"], list):
+            if len(truncated["rows"]) > max_rows:
+                truncated["rows"] = truncated["rows"][:max_rows]
+        
+        if "Rows" in truncated and isinstance(truncated["Rows"], list):
+            if len(truncated["Rows"]) > max_rows:
+                truncated["Rows"] = truncated["Rows"][:max_rows]
+        
+        return truncated
 
