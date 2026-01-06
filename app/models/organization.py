@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from app.models.calculated_metrics import CalculatedMetrics
     from app.models.executive_summary_cache import ExecutiveSummaryCache
     from app.models.profit_loss_cache import ProfitLossCache
+    from app.models.insight import Insight
 
 
 class Organization(Base, UUIDMixin, TimestampMixin):
@@ -106,6 +107,13 @@ class Organization(Base, UUIDMixin, TimestampMixin):
     
     profit_loss_caches: Mapped[list["ProfitLossCache"]] = relationship(
         "ProfitLossCache",
+        back_populates="organization",
+        lazy="selectin",
+        cascade="all, delete-orphan",
+    )
+    
+    insights: Mapped[list["Insight"]] = relationship(
+        "Insight",
         back_populates="organization",
         lazy="selectin",
         cascade="all, delete-orphan",

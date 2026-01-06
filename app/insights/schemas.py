@@ -94,6 +94,24 @@ class UpcomingCommitmentsMetrics(BaseModel):
     squeeze_risk: str = Field(..., description="Cash squeeze risk: low, medium, or high")
 
 
+class Insight(BaseModel):
+    """Single financial insight."""
+    
+    model_config = ConfigDict(extra="allow")
+    
+    insight_id: str = Field(..., description="Unique identifier for this insight")
+    insight_type: str = Field(..., description="Type of insight (cash_runway_risk, upcoming_cash_squeeze, etc.)")
+    title: str = Field(..., description="Plain-English headline")
+    severity: str = Field(..., description="Severity level: high, medium, or low")
+    confidence_level: str = Field(..., description="Confidence level: high, medium, or low")
+    summary: str = Field(..., description="1-2 sentence summary of what's happening")
+    why_it_matters: str = Field(..., description="Short paragraph explaining why this matters now")
+    recommended_actions: list[str] = Field(..., description="List of actionable steps (3-5 items)")
+    supporting_numbers: list[dict[str, Any]] = Field(default_factory=list, description="Key numbers supporting the insight")
+    data_notes: Optional[str] = Field(None, description="Optional notes about data quality or limitations")
+    generated_at: str = Field(..., description="ISO timestamp when insight was generated")
+
+
 class InsightsResponse(BaseModel):
     """Complete insights response."""
     
@@ -102,6 +120,7 @@ class InsightsResponse(BaseModel):
     cash_pressure: CashPressureMetrics = Field(..., description="Cash pressure status")
     profitability: ProfitabilityMetrics = Field(..., description="Profitability analysis")
     upcoming_commitments: UpcomingCommitmentsMetrics = Field(..., description="Upcoming cash commitments")
+    insights: list[Insight] = Field(default_factory=list, description="Top 1-3 insights ranked by urgency")
     calculated_at: str = Field(..., description="ISO timestamp when insights were calculated")
     raw_data_summary: dict[str, Any] = Field(..., description="Compact summary of raw financial data for AI analysis")
 

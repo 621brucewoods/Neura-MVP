@@ -13,6 +13,7 @@ from app.models.profit_loss_cache import ProfitLossCache
 from app.models.login_attempt import LoginAttempt
 from app.models.refresh_token import RefreshToken
 from app.models.token_blacklist import TokenBlacklist
+from app.models.insight import Insight
 
 __all__ = [
     "User",
@@ -25,5 +26,6 @@ __all__ = [
     "LoginAttempt",
     "RefreshToken",
     "TokenBlacklist",
+    "Insight",
 ]
 

@@ -34,6 +34,7 @@ from app.models import (
     LoginAttempt,
     RefreshToken,
     TokenBlacklist,
+    Insight,
 )
 
 # Alembic Config object
