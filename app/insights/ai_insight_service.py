@@ -1,0 +1,291 @@
+"""
+AI Insight Service
+Generates financial insights using OpenAI with structured JSON output.
+"""
+
+import json
+import logging
+from typing import Any
+
+from openai import OpenAI
+
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class AIInsightService:
+    """Service for generating insights using OpenAI."""
+    
+    def __init__(self):
+        """Initialize OpenAI client."""
+        if not settings.openai_api_key:
+            raise ValueError("OPENAI_API_KEY is not configured")
+        
+        self.client = OpenAI(api_key=settings.openai_api_key)
+        self.model = settings.openai_model
+    
+    def generate_insights(
+        self,
+        metrics: dict[str, Any],
+        raw_data_summary: dict[str, Any],
+        start_date: str,
+        end_date: str,
+    ) -> list[dict[str, Any]]:
+        """
+        Generate insights using OpenAI.
+        
+        Args:
+            metrics: Calculated financial metrics
+            raw_data_summary: Summarized raw financial data
+            start_date: Start date of analysis period
+            end_date: End date of analysis period
+        
+        Returns:
+            List of insight dictionaries (1-3 items)
+        
+        Raises:
+            ValueError: If API response is invalid
+            Exception: If API call fails
+        """
+        prompt = self._build_prompt(metrics, raw_data_summary, start_date, end_date)
+        schema = self._get_json_schema()
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": self._get_system_prompt(),
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "financial_insights",
+                        "strict": True,
+                        "schema": schema,
+                    },
+                },
+                temperature=0.7,
+            )
+            
+            content = response.choices[0].message.content
+            if not content:
+                raise ValueError("Empty response from OpenAI")
+            
+            parsed = json.loads(content)
+            insights = parsed.get("insights", [])
+            
+            if not insights:
+                logger.warning("OpenAI returned no insights")
+                return []
+            
+            # Validate and limit to 3
+            validated_insights = self._validate_insights(insights[:3])
+            return validated_insights
+            
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse OpenAI JSON response: %s", e)
+            raise ValueError(f"Invalid JSON response from OpenAI: {e}") from e
+        except Exception as e:
+            logger.error("OpenAI API error: %s", e)
+            raise
+    
+    def _get_system_prompt(self) -> str:
+        """Get system prompt with role and guidelines."""
+        return """You are a financial advisor helping small business owners understand their cash flow health.
+
+                Your role:
+                - Generate clear, actionable insights in plain English
+                - Use a calm, confident tone (never panic or shame)
+                - Focus on what matters now and what to do next
+                - Explain "why" without overwhelming detail
+                - Assume data may be imperfect and communicate gracefully
+
+                Tone guidelines:
+                - ✅ "You may have a cash squeeze in 3-4 weeks unless invoices are collected."
+                - ❌ "Your accounts are unhealthy and at risk."
+
+                Output requirements:
+                - Generate 1-3 insights ranked by urgency
+                - Each insight must be actionable with concrete next steps
+                - Use severity: high (immediate action), medium (monitor closely), low (awareness)
+                - Use confidence: high (data is complete), medium (some gaps), low (limited data)"""
+    
+    def _build_prompt(
+        self,
+        metrics: dict[str, Any],
+        raw_data_summary: dict[str, Any],
+        start_date: str,
+        end_date: str,
+    ) -> str:
+        """Build user prompt with metrics and data summary."""
+        return f"""Analyze the following financial data and generate 1-3 insights ranked by urgency.
+
+                Analysis Period: {start_date} to {end_date}
+
+                CALCULATED METRICS:
+                {json.dumps(metrics, indent=2)}
+
+                RAW DATA SUMMARY:
+                {json.dumps(raw_data_summary, indent=2)}
+
+Generate insights that:
+1. Identify the most urgent cash flow risks or opportunities
+2. Explain what's happening in plain English
+3. Explain why it matters now
+4. Provide 3-5 concrete, actionable next steps
+5. Include relevant supporting numbers (can be empty array if not applicable)
+6. Include data notes only if data quality issues exist (can be empty string)
+
+Return insights as JSON matching the required schema. Rank by urgency (most urgent first).
+All fields are required, but supporting_numbers can be [] and data_notes can be "" if not applicable."""
+    
+    def _get_json_schema(self) -> dict[str, Any]:
+        """Get JSON schema for structured output."""
+        return {
+            "type": "object",
+            "properties": {
+                "insights": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "insight_type": {
+                                "type": "string",
+                                "enum": [
+                                    "cash_runway_risk",
+                                    "upcoming_cash_squeeze",
+                                    "receivables_risk",
+                                    "expense_spike",
+                                    "profitability_pressure",
+                                ],
+                            },
+                            "title": {
+                                "type": "string",
+                                "description": "Plain-English headline (max 100 chars)",
+                            },
+                            "severity": {
+                                "type": "string",
+                                "enum": ["high", "medium", "low"],
+                            },
+                            "confidence_level": {
+                                "type": "string",
+                                "enum": ["high", "medium", "low"],
+                            },
+                            "summary": {
+                                "type": "string",
+                                "description": "1-2 sentence summary of what's happening",
+                            },
+                            "why_it_matters": {
+                                "type": "string",
+                                "description": "Short paragraph explaining why this matters now",
+                            },
+                            "recommended_actions": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "minItems": 3,
+                                "maxItems": 5,
+                                "description": "List of concrete, actionable steps",
+                            },
+                            "supporting_numbers": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": {"type": "string"},
+                                        "value": {"type": "string"},
+                                    },
+                                    "required": ["label", "value"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            "data_notes": {
+                                "type": "string",
+                                "description": "Optional notes about data quality or limitations",
+                            },
+                        },
+                        "required": [
+                            "insight_type",
+                            "title",
+                            "severity",
+                            "confidence_level",
+                            "summary",
+                            "why_it_matters",
+                            "recommended_actions",
+                            "supporting_numbers",
+                            "data_notes",
+                        ],
+                        "additionalProperties": False,
+                    },
+                    "minItems": 1,
+                    "maxItems": 3,
+                },
+            },
+            "required": ["insights"],
+            "additionalProperties": False,
+        }
+    
+    def _validate_insights(self, insights: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """
+        Validate insights structure and fix common issues.
+        
+        Args:
+            insights: List of insight dictionaries
+        
+        Returns:
+            Validated list of insights
+        """
+        validated = []
+        
+        for insight in insights:
+            # Ensure required fields
+            if not all(
+                key in insight
+                for key in [
+                    "insight_type",
+                    "title",
+                    "severity",
+                    "confidence_level",
+                    "summary",
+                    "why_it_matters",
+                    "recommended_actions",
+                ]
+            ):
+                logger.warning("Skipping invalid insight: missing required fields")
+                continue
+            
+            # Ensure actions list is 3-5 items
+            actions = insight.get("recommended_actions", [])
+            if len(actions) < 3:
+                logger.warning("Insight has fewer than 3 actions, padding with generic actions")
+                actions.extend([
+                    "Review your cash position regularly",
+                    "Monitor key financial metrics weekly",
+                ])
+                insight["recommended_actions"] = actions[:5]
+            elif len(actions) > 5:
+                insight["recommended_actions"] = actions[:5]
+            
+            # Ensure supporting_numbers is a list (required, can be empty)
+            if "supporting_numbers" not in insight:
+                insight["supporting_numbers"] = []
+            elif not isinstance(insight["supporting_numbers"], list):
+                insight["supporting_numbers"] = []
+            
+            # Ensure data_notes is a string (required, can be empty)
+            if "data_notes" not in insight:
+                insight["data_notes"] = ""
+            elif insight["data_notes"] is None:
+                insight["data_notes"] = ""
+            
+            validated.append(insight)
+        
+        return validated
+

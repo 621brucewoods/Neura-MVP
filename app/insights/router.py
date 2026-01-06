@@ -95,17 +95,23 @@ async def get_insights(
         # Calculate insights from fetched data
         metrics = InsightsService.calculate_all_insights(financial_data, data_fetcher)
         
-        # Generate ranked insights from metrics
-        generated_insights = InsightGenerator.generate_insights(
-            cash_runway=metrics["cash_runway"],
-            cash_pressure=metrics["cash_pressure"],
-            leading_indicators=metrics["leading_indicators"],
-            profitability=metrics["profitability"],
-            upcoming_commitments=metrics["upcoming_commitments"],
-        )
-        
         # Create compact summary of raw data for AI analysis
         raw_data_summary = DataSummarizer.summarize(financial_data, start_date, end_date, data_fetcher)
+        
+        # Generate ranked insights using AI
+        insight_generator = InsightGenerator()
+        generated_insights = insight_generator.generate_insights(
+            metrics={
+                "cash_runway": metrics["cash_runway"],
+                "cash_pressure": metrics["cash_pressure"],
+                "leading_indicators": metrics["leading_indicators"],
+                "profitability": metrics["profitability"],
+                "upcoming_commitments": metrics["upcoming_commitments"],
+            },
+            raw_data_summary=raw_data_summary,
+            start_date=start_date.isoformat(),
+            end_date=end_date.isoformat(),
+        )
         
         return InsightsResponse(
             cash_runway=metrics["cash_runway"],
@@ -180,13 +186,22 @@ async def get_insight_detail(
         # Calculate metrics
         metrics = InsightsService.calculate_all_insights(financial_data, data_fetcher)
         
-        # Generate all insights
-        all_insights = InsightGenerator.generate_insights(
-            cash_runway=metrics["cash_runway"],
-            cash_pressure=metrics["cash_pressure"],
-            leading_indicators=metrics["leading_indicators"],
-            profitability=metrics["profitability"],
-            upcoming_commitments=metrics["upcoming_commitments"],
+        # Create compact summary of raw data for AI analysis
+        raw_data_summary = DataSummarizer.summarize(financial_data, start_date, end_date, data_fetcher)
+        
+        # Generate all insights using AI
+        insight_generator = InsightGenerator()
+        all_insights = insight_generator.generate_insights(
+            metrics={
+                "cash_runway": metrics["cash_runway"],
+                "cash_pressure": metrics["cash_pressure"],
+                "leading_indicators": metrics["leading_indicators"],
+                "profitability": metrics["profitability"],
+                "upcoming_commitments": metrics["upcoming_commitments"],
+            },
+            raw_data_summary=raw_data_summary,
+            start_date=start_date.isoformat(),
+            end_date=end_date.isoformat(),
         )
         
         # Find insight by ID
