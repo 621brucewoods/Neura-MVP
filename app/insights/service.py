@@ -10,7 +10,6 @@ from app.insights.cash_calculators import (
     CashRunwayCalculator,
     CashPressureCalculator,
 )
-from app.insights.trend_analyzer import TrendAnalyzer
 from app.insights.profitability_calculator import ProfitabilityCalculator
 from app.insights.indicators_calculator import (
     LeadingIndicatorsCalculator,
@@ -26,7 +25,7 @@ class InsightsService:
     Service for calculating financial insights.
     
     Takes raw data from XeroDataFetcher and returns calculated insights
-    for cash runway, trends, and leading indicators.
+    for cash runway, leading indicators, and cash pressure.
     """
     
     @staticmethod
@@ -78,48 +77,6 @@ class InsightsService:
         )
     
     @staticmethod
-    def calculate_trends(
-        balance_sheet_current: dict[str, Any],
-        balance_sheet_prior: dict[str, Any],
-        fetcher: XeroDataFetcher
-    ) -> dict[str, Any]:
-        """
-        Calculate trend analysis metrics from Balance Sheets.
-        
-        Args:
-            balance_sheet_current: Current Balance Sheet data
-            balance_sheet_prior: Prior Balance Sheet data
-            fetcher: XeroDataFetcher instance
-        
-        Returns:
-            Dictionary with trend metrics
-        """
-        from datetime import date
-        
-        cash_position_current = InsightsService._extract_cash_from_balance_sheet(balance_sheet_current, fetcher)
-        cash_position_prior = InsightsService._extract_cash_from_balance_sheet(balance_sheet_prior, fetcher)
-        
-        net_cash_change = cash_position_current - cash_position_prior
-        cash_received = max(0.0, net_cash_change)
-        cash_spent = abs(min(0.0, net_cash_change))
-        
-        # Format for TrendAnalyzer (expects current + history)
-        executive_summary_current = {
-            "cash_position": cash_position_current,
-            "cash_spent": cash_spent,
-            "cash_received": cash_received,
-            "report_date": date.today(),
-        }
-        
-        # For now, history is empty (trends will be limited)
-        executive_summary_history = []
-        
-        return TrendAnalyzer.calculate(
-            executive_summary_current=executive_summary_current,
-            executive_summary_history=executive_summary_history,
-        )
-    
-    @staticmethod
     def calculate_leading_indicators(
         receivables: dict[str, Any],
         payables: dict[str, Any],
@@ -167,15 +124,13 @@ class InsightsService:
     
     @staticmethod
     def calculate_cash_pressure(
-        cash_runway: dict[str, Any],
-        trends: dict[str, Any]
+        cash_runway: dict[str, Any]
     ) -> dict[str, Any]:
         """
         Calculate cash pressure status.
         
         Args:
             cash_runway: Cash runway metrics
-            trends: Trend analysis metrics
         
         Returns:
             Dictionary with cash pressure status
@@ -183,7 +138,6 @@ class InsightsService:
         return CashPressureCalculator.calculate(
             runway_months=cash_runway.get("runway_months"),
             runway_status=cash_runway.get("status"),
-            revenue_volatility=trends.get("revenue_volatility"),
             cash_position=cash_runway.get("current_cash"),
         )
     
@@ -271,7 +225,6 @@ class InsightsService:
         Returns:
             Dictionary with all calculated insights:
             - cash_runway
-            - trends
             - leading_indicators
             - cash_pressure
             - profitability
@@ -290,12 +243,6 @@ class InsightsService:
             fetcher
         )
         
-        trends = InsightsService.calculate_trends(
-            balance_sheet_current,
-            balance_sheet_prior,
-            fetcher
-        )
-        
         leading_indicators = InsightsService.calculate_leading_indicators(
             receivables,
             payables,
@@ -305,8 +252,7 @@ class InsightsService:
         )
         
         cash_pressure = InsightsService.calculate_cash_pressure(
-            cash_runway,
-            trends
+            cash_runway
         )
         
         profitability = InsightsService.calculate_profitability(
@@ -325,7 +271,6 @@ class InsightsService:
         
         return {
             "cash_runway": cash_runway,
-            "trends": trends,
             "leading_indicators": leading_indicators,
             "cash_pressure": cash_pressure,
             "profitability": profitability,

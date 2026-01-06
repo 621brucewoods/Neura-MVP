@@ -28,7 +28,7 @@ router = APIRouter(prefix="/api/insights", tags=["Insights"])
     "/",
     response_model=InsightsResponse,
     summary="Get all financial insights",
-    description="Calculate and return all financial insights: cash runway, trends, and leading indicators. Uses cache when available.",
+    description="Calculate and return all financial insights: cash runway, leading indicators, and cash pressure. Uses cache when available.",
 )
 async def get_insights(
     current_user: User = Depends(get_current_user),
@@ -44,8 +44,8 @@ async def get_insights(
     - Uses cached data when available (exact date range match only, unless force_refresh=true)
     - Fetches financial data from Xero (or cache)
     - Calculates cash runway metrics
-    - Analyzes cash flow trends
     - Identifies leading indicators of cash stress
+    - Calculates cash pressure status
     
     Returns comprehensive insights ready for dashboard display.
     """
@@ -98,7 +98,6 @@ async def get_insights(
         
         return InsightsResponse(
             cash_runway=insights["cash_runway"],
-            trends=insights["trends"],
             leading_indicators=insights["leading_indicators"],
             cash_pressure=insights["cash_pressure"],
             profitability=insights["profitability"],

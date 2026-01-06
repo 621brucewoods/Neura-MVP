@@ -139,14 +139,13 @@ class CashPressureCalculator:
     """
     Calculates cash pressure status (GREEN/AMBER/RED).
     
-    Combines runway status with revenue volatility to determine overall pressure.
+    Uses runway status to determine overall cash pressure.
     """
     
     @staticmethod
     def calculate(
         runway_months: Optional[float],
         runway_status: str,
-        revenue_volatility: Optional[float],
         cash_position: Optional[float] = None
     ) -> dict[str, Any]:
         """
@@ -155,7 +154,6 @@ class CashPressureCalculator:
         Args:
             runway_months: Cash runway in months (None if infinite/profitable)
             runway_status: Runway status (healthy/warning/critical/negative/infinite)
-            revenue_volatility: Revenue volatility coefficient (None if insufficient data)
             cash_position: Current cash balance (optional, for additional validation)
         
         Returns:
@@ -192,22 +190,12 @@ class CashPressureCalculator:
                     "status": "AMBER",
                     "confidence": "high",
                 }
-            if revenue_volatility is not None and revenue_volatility > 50:
-                return {
-                    "status": "AMBER",
-                    "confidence": "high",
-                }
             return {
                 "status": "AMBER",
                 "confidence": "medium",
             }
         
         if runway_status == "healthy":
-            if revenue_volatility is not None and revenue_volatility > 40:
-                return {
-                    "status": "AMBER",
-                    "confidence": "medium",
-                }
             return {
                 "status": "GREEN",
                 "confidence": "high",

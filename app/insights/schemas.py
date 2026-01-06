@@ -19,17 +19,6 @@ class CashRunwayMetrics(BaseModel):
     status: str = Field(..., description="Runway status: healthy, warning, critical, negative, or infinite")
 
 
-class TrendMetrics(BaseModel):
-    """Trend analysis metrics."""
-    
-    model_config = ConfigDict(extra="allow")
-    
-    expense_acceleration: Optional[float] = Field(None, description="Month-over-month % change in expenses")
-    revenue_volatility: Optional[float] = Field(None, description="Revenue volatility (coefficient of variation)")
-    net_cash_flow_trend: str = Field(..., description="Net cash flow trend: improving, declining, or stable")
-    monthly_changes: list[dict[str, Any]] = Field(..., description="Month-over-month changes")
-
-
 class ReceivablesHealth(BaseModel):
     """Receivables health metrics."""
     
@@ -109,7 +98,6 @@ class InsightsResponse(BaseModel):
     """Complete insights response."""
     
     cash_runway: CashRunwayMetrics = Field(..., description="Cash runway calculations")
-    trends: TrendMetrics = Field(..., description="Trend analysis")
     leading_indicators: LeadingIndicatorsMetrics = Field(..., description="Leading indicators")
     cash_pressure: CashPressureMetrics = Field(..., description="Cash pressure status")
     profitability: ProfitabilityMetrics = Field(..., description="Profitability analysis")
