@@ -4,7 +4,7 @@ Creates configured xero-python SDK clients from stored tokens.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -16,6 +16,7 @@ from xero_python.accounting import AccountingApi
 
 from app.config import settings
 from app.integrations.xero.service import XeroService
+from app.integrations.xero.token_refresh_lock import TokenRefreshLock
 from app.models.xero_token import XeroConnectionStatus, XeroToken
 
 logger = logging.getLogger(__name__)
@@ -81,11 +82,14 @@ class XeroSDKClient:
         
         Note: This is called synchronously by the SDK during auto-refresh.
         We update the in-memory token dict and token object.
-        Database commit must be called explicitly after SDK operations.
+        Database commit must be called explicitly after SDK operations via commit_token_updates().
+        
+        The actual database commit is protected by a lock in commit_token_updates()
+        to prevent race conditions.
         """
         self._token_dict.update(new_token)
         
-        # Update the token object
+        # Update the token object (in-memory only, commit happens in commit_token_updates)
         self.token.access_token = new_token.get("access_token", self.token.access_token)
         self.token.refresh_token = new_token.get("refresh_token", self.token.refresh_token)
         self.token.status = XeroConnectionStatus.ACTIVE.value
@@ -102,7 +106,7 @@ class XeroSDKClient:
         
         self.token.last_refreshed_at = datetime.now(timezone.utc)
         
-        logger.info("SDK refreshed tokens - commit required after operation")
+        logger.debug("SDK refreshed tokens - commit required after operation")
     
     def _create_api_client(self) -> ApiClient:
         """Create configured ApiClient instance."""
@@ -146,9 +150,41 @@ class XeroSDKClient:
         return self.token.xero_tenant_id
     
     async def commit_token_updates(self) -> None:
-        """Commit any token updates to database."""
-        await self.xero_service.db.commit()
-        await self.xero_service.db.refresh(self.token)
+        """
+        Commit any token updates to database with race condition protection.
+        
+        Uses a per-organization lock to prevent multiple concurrent processes
+        from refreshing the token simultaneously, which would cause invalid_grant errors.
+        """
+        # Get organization_id from token
+        organization_id = self.token.organization_id
+        
+        # Get lock for this organization
+        lock = await TokenRefreshLock.get_lock(organization_id)
+        
+        async with lock:
+            # Refresh token from database to get latest state
+            await self.xero_service.db.refresh(self.token)
+            
+            # Check if token was just refreshed by another process (within last 5 seconds)
+            if self.token.last_refreshed_at:
+                time_since_refresh = datetime.now(timezone.utc) - self.token.last_refreshed_at
+                if time_since_refresh < timedelta(seconds=5):
+                    # Token was recently refreshed, check if our in-memory token is stale
+                    if self.token.refresh_token != self._token_dict.get("refresh_token"):
+                        # Another process refreshed, update our in-memory dict
+                        logger.info(
+                            "Token was refreshed by another process, updating in-memory token for org %s",
+                            organization_id
+                        )
+                        self._token_dict = self._build_token_dict()
+                        return  # No need to commit, token already saved
+            
+            # Commit our token updates
+            await self.xero_service.db.commit()
+            await self.xero_service.db.refresh(self.token)
+            
+            logger.debug("Committed token updates for organization %s", organization_id)
 
 
 async def create_xero_sdk_client(

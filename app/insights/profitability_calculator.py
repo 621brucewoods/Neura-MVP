@@ -2,9 +2,36 @@
 Profitability calculator for P&L analysis.
 """
 
+import logging
 from typing import Any, Optional
 
 from app.insights.utils import safe_float, safe_get, safe_list_get, safe_str_lower
+
+logger = logging.getLogger(__name__)
+
+# Synonym map for financial concepts across different locales and terminologies
+FINANCIAL_SYNONYMS = {
+    "revenue": [
+        "revenue", "income", "sales", "turnover", "total income", "trading income",
+        "total revenue", "total sales", "income total", "revenue total",
+        "ventes", "chiffre d'affaires", "recettes"  # French
+    ],
+    "cost_of_sales": [
+        "cost of sales", "cogs", "cost of goods", "cost of goods sold",
+        "total cost of sales", "direct costs", "cost of revenue"
+    ],
+    "gross_profit": [
+        "gross profit", "gross margin", "total gross profit", "gross income"
+    ],
+    "expenses": [
+        "expenses", "operating expenses", "overheads", "costs", "total expenses",
+        "total operating expenses", "operating costs", "operating expenditure"
+    ],
+    "net_profit": [
+        "net profit", "net income", "profit", "total profit", "total net profit",
+        "net profit after tax", "profit (loss)", "surplus (deficit)", "net result"
+    ],
+}
 
 
 class ProfitabilityCalculator:
@@ -13,6 +40,74 @@ class ProfitabilityCalculator:
     
     Analyzes gross margin, profit trends, and profitability pressure.
     """
+    
+    @staticmethod
+    def _identify_row_intent(label: str) -> Optional[str]:
+        """
+        Identify the financial concept from a label using synonym matching.
+        
+        Args:
+            label: Row label (e.g., "Total Revenue", "Turnover", "Ventes")
+            
+        Returns:
+            Standardized key (e.g., "revenue", "expenses") or None if no match
+        """
+        if not label:
+            return None
+        
+        clean_label = safe_str_lower(label, "").strip()
+        
+        for key, synonyms in FINANCIAL_SYNONYMS.items():
+            for synonym in synonyms:
+                if synonym in clean_label or clean_label in synonym:
+                    return key
+        
+        return None
+    
+    @staticmethod
+    def _find_target_column_index(rows: list) -> int:
+        """
+        Find the column index containing the current period data.
+        
+        Scans Header rows to identify which column contains the target data.
+        Falls back to index 1 (second column) if header not found.
+        
+        Args:
+            rows: List of report rows
+            
+        Returns:
+            Column index (default: 1)
+        """
+        if not isinstance(rows, list):
+            return 1
+        
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            
+            row_type = safe_get(row, "row_type", "")
+            if row_type != "Header":
+                continue
+            
+            cells = safe_get(row, "cells", [])
+            if not isinstance(cells, list) or len(cells) < 2:
+                continue
+            
+            # Look for the first data column (skip empty first column)
+            # Typically: Column 0 = empty/label, Column 1 = current period
+            for i in range(1, len(cells)):
+                cell = safe_list_get(cells, i)
+                if isinstance(cell, dict):
+                    value = safe_get(cell, "value", "")
+                    if value and value.strip():
+                        # Found a column with data, use it
+                        return i
+            
+            # If no data found, default to index 1
+            return 1
+        
+        # No header found, default to index 1
+        return 1
     
     @staticmethod
     def _extract_pnl_values(pnl_data: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -42,55 +137,175 @@ class ProfitabilityCalculator:
         if not isinstance(rows, list):
             rows = []
         
+        # Find target column index from header
+        target_col_index = ProfitabilityCalculator._find_target_column_index(rows)
+        
         revenue = None
         cost_of_sales = None
         gross_profit = None
         expenses = None
         net_profit = None
         
-        def _find_value_in_rows(rows_list: list, search_terms: list[str]) -> Optional[float]:
-            """Recursively search for value in P&L rows."""
+        def _find_value_in_rows(rows_list: list, target_key: str, prefer_total: bool = True) -> Optional[float]:
+            """
+            Recursively search for value in P&L rows using semantic matching.
+            
+            Collects ALL matching values, then returns the best one based on priority:
+            1. SummaryRow (always preferred when prefer_total=True)
+            2. Row with "total" in label
+            3. Any other matching Row
+            
+            Args:
+                rows_list: List of row dictionaries
+                target_key: Target financial concept key (e.g., "revenue", "expenses")
+                prefer_total: If True, prefer SummaryRow (totals) over individual rows
+            """
             if not isinstance(rows_list, list):
                 return None
+            
+            found_values = []
             
             for row in rows_list:
                 if not isinstance(row, dict):
                     continue
                 
-                # Safely get and normalize title
-                title = safe_str_lower(safe_get(row, "title"), "")
-                
-                # Safely get cells list
+                row_type = safe_get(row, "row_type", "")
                 cells = safe_get(row, "cells", [])
                 if not isinstance(cells, list):
                     cells = []
                 
-                # Search for matching term in title
-                for term in search_terms:
-                    if term in title:
-                        # Safely access cell value
-                        if len(cells) > 1:
-                            cell = safe_list_get(cells, 1)
-                            if isinstance(cell, dict):
-                                value_str = safe_get(cell, "value", "0")
-                                value = safe_float(value_str)
-                                if value != 0:
-                                    return value
+                # Get label from appropriate location based on row_type
+                label = ""
+                if row_type == "Section":
+                    # Section rows have label in title
+                    label = safe_str_lower(safe_get(row, "title"), "")
+                elif row_type in ["SummaryRow", "Row"]:
+                    # SummaryRow/Row have label in first cell
+                    if len(cells) > 0:
+                        label_cell = safe_list_get(cells, 0)
+                        if isinstance(label_cell, dict):
+                            label = safe_str_lower(safe_get(label_cell, "value", ""), "")
+                else:
+                    # Fallback: try both title and first cell (handles empty-title sections)
+                    title_label = safe_str_lower(safe_get(row, "title"), "")
+                    cell_label = ""
+                    if len(cells) > 0:
+                        label_cell = safe_list_get(cells, 0)
+                        if isinstance(label_cell, dict):
+                            cell_label = safe_str_lower(safe_get(label_cell, "value", ""), "")
+                    label = title_label or cell_label
                 
-                # Recursively search nested rows
+                # Use semantic matching to identify if this row itself matches target
+                row_intent = ProfitabilityCalculator._identify_row_intent(label)
+                
+                # Check if this row itself matches (only for non-Section rows, Sections are containers)
+                if row_intent == target_key and row_type != "Section":
+                    # Extract value from target column (not hard-coded index 1)
+                    if len(cells) > target_col_index:
+                        value_cell = safe_list_get(cells, target_col_index)
+                        if isinstance(value_cell, dict):
+                            value_str = safe_get(value_cell, "value", "0")
+                            value = safe_float(value_str)
+                            # Accept zero values (they're valid)
+                            if value is not None:
+                                # Determine priority: SummaryRow is ALWAYS highest priority
+                                is_summary_row = (row_type == "SummaryRow")
+                                has_total_in_label = ("total" in label)
+                                # Priority: 2 = SummaryRow, 1 = has "total", 0 = regular row
+                                priority = 2 if is_summary_row else (1 if has_total_in_label else 0)
+                                found_values.append((value, priority))
+                
+                # ALWAYS search nested rows (even if current row doesn't match)
+                # This handles empty-title Sections and ensures we find all matches
                 nested_rows = safe_get(row, "rows", [])
                 if isinstance(nested_rows, list) and nested_rows:
-                    found = _find_value_in_rows(nested_rows, search_terms)
-                    if found is not None:
-                        return found
+                    # Process nested rows directly (not recursive call) to maintain priority information
+                    for nested_row in nested_rows:
+                        if not isinstance(nested_row, dict):
+                            continue
+                        
+                        nested_row_type = safe_get(nested_row, "row_type", "")
+                        nested_cells = safe_get(nested_row, "cells", [])
+                        if not isinstance(nested_cells, list):
+                            nested_cells = []
+                        
+                        # Get nested row label
+                        nested_label = ""
+                        if nested_row_type in ["SummaryRow", "Row"]:
+                            if len(nested_cells) > 0:
+                                nested_label_cell = safe_list_get(nested_cells, 0)
+                                if isinstance(nested_label_cell, dict):
+                                    nested_label = safe_str_lower(safe_get(nested_label_cell, "value", ""), "")
+                        
+                        # Check if nested row matches
+                        nested_intent = ProfitabilityCalculator._identify_row_intent(nested_label)
+                        if nested_intent == target_key:
+                            # Extract value from nested row
+                            if len(nested_cells) > target_col_index:
+                                nested_value_cell = safe_list_get(nested_cells, target_col_index)
+                                if isinstance(nested_value_cell, dict):
+                                    nested_value_str = safe_get(nested_value_cell, "value", "0")
+                                    nested_value = safe_float(nested_value_str)
+                                    if nested_value is not None:
+                                        # Determine priority: SummaryRow is ALWAYS highest
+                                        is_summary = (nested_row_type == "SummaryRow")
+                                        has_total = ("total" in nested_label)
+                                        priority = 2 if is_summary else (1 if has_total else 0)
+                                        found_values.append((nested_value, priority))
+                        
+                        # Recursively search deeper nested rows (for multi-level nesting)
+                        deeper_nested = safe_get(nested_row, "rows", [])
+                        if isinstance(deeper_nested, list) and deeper_nested:
+                            # Recursive call for deeper nesting - collect all matches
+                            for deeper_row in deeper_nested:
+                                if not isinstance(deeper_row, dict):
+                                    continue
+                                
+                                deeper_row_type = safe_get(deeper_row, "row_type", "")
+                                deeper_cells = safe_get(deeper_row, "cells", [])
+                                if not isinstance(deeper_cells, list):
+                                    deeper_cells = []
+                                
+                                deeper_label = ""
+                                if deeper_row_type in ["SummaryRow", "Row"]:
+                                    if len(deeper_cells) > 0:
+                                        deeper_label_cell = safe_list_get(deeper_cells, 0)
+                                        if isinstance(deeper_label_cell, dict):
+                                            deeper_label = safe_str_lower(safe_get(deeper_label_cell, "value", ""), "")
+                                
+                                deeper_intent = ProfitabilityCalculator._identify_row_intent(deeper_label)
+                                if deeper_intent == target_key:
+                                    if len(deeper_cells) > target_col_index:
+                                        deeper_value_cell = safe_list_get(deeper_cells, target_col_index)
+                                        if isinstance(deeper_value_cell, dict):
+                                            deeper_value_str = safe_get(deeper_value_cell, "value", "0")
+                                            deeper_value = safe_float(deeper_value_str)
+                                            if deeper_value is not None:
+                                                is_deeper_summary = (deeper_row_type == "SummaryRow")
+                                                has_deeper_total = ("total" in deeper_label)
+                                                deeper_priority = 2 if is_deeper_summary else (1 if has_deeper_total else 0)
+                                                found_values.append((deeper_value, deeper_priority))
             
-            return None
+            if not found_values:
+                return None
+            
+            # Sort by priority (highest first): SummaryRow > "total" in label > regular row
+            found_values.sort(key=lambda x: x[1], reverse=True)
+            
+            # If prefer_total, return the highest priority value (SummaryRow if available)
+            if prefer_total:
+                # Return the highest priority value (SummaryRow preferred)
+                return found_values[0][0]
+            
+            # Return the first value found (already sorted by priority)
+            return found_values[0][0]
         
-        revenue = _find_value_in_rows(rows, ["revenue", "income", "sales", "total income"])
-        cost_of_sales = _find_value_in_rows(rows, ["cost of sales", "cogs", "cost of goods"])
-        gross_profit = _find_value_in_rows(rows, ["gross profit"])
-        expenses = _find_value_in_rows(rows, ["expenses", "total expenses", "operating expenses"])
-        net_profit = _find_value_in_rows(rows, ["net profit", "net income", "profit"])
+        # Use semantic matching with synonym map (handles different locales and terminologies)
+        revenue = _find_value_in_rows(rows, "revenue", prefer_total=True)
+        cost_of_sales = _find_value_in_rows(rows, "cost_of_sales", prefer_total=True)
+        gross_profit = _find_value_in_rows(rows, "gross_profit", prefer_total=True)
+        expenses = _find_value_in_rows(rows, "expenses", prefer_total=True)
+        net_profit = _find_value_in_rows(rows, "net_profit", prefer_total=True)
         
         return {
             "revenue": revenue,

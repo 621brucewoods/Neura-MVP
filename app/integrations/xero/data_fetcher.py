@@ -6,6 +6,7 @@ Primary data source: Executive Summary Report (accurate cash flow metrics).
 """
 
 import logging
+import re
 from datetime import datetime, date, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
@@ -15,6 +16,8 @@ from xero_python.exceptions import ApiException
 
 from app.integrations.xero.sdk_client import XeroSDKClient
 from app.integrations.xero.cache_service import CacheService
+from app.integrations.xero.rate_limiter import XeroRateLimiter
+from app.integrations.xero.retry_handler import XeroRetryHandler
 
 logger = logging.getLogger(__name__)
 
@@ -83,27 +86,108 @@ class XeroDataFetcher:
     Provides clean, normalized data structures for cash runway calculations.
     """
     
-    def __init__(self, sdk_client: XeroSDKClient, cache_service: Optional[CacheService] = None):
+    def __init__(
+        self, 
+        sdk_client: XeroSDKClient, 
+        cache_service: Optional[CacheService] = None,
+        rate_limiter: Optional[XeroRateLimiter] = None,
+        retry_handler: Optional[XeroRetryHandler] = None,
+    ):
         """
-        Initialize data fetcher with SDK client and optional cache service.
+        Initialize data fetcher with SDK client and optional services.
         
         Args:
             sdk_client: Configured XeroSDKClient instance
             cache_service: Optional CacheService for caching data
+            rate_limiter: Optional XeroRateLimiter for rate limiting (creates default if None)
+            retry_handler: Optional XeroRetryHandler for retry logic (creates default if None)
         """
         self.client = sdk_client
         self.api = sdk_client.accounting_api
         self.tenant_id = sdk_client.tenant_id
         self.cache_service = cache_service
+        self.rate_limiter = rate_limiter or XeroRateLimiter()
+        self.retry_handler = retry_handler or XeroRetryHandler()
     
-    def _parse_decimal(self, value: Any, default: str = "0.00") -> Decimal:
-        """Safely parse a value to Decimal."""
+    def _parse_currency_value(self, value: Any, default: str = "0.00") -> Decimal:
+        """
+        Robustly parse currency values from Xero cell values.
+        
+        Handles:
+        - Currency symbols: $, £, €, USD, EUR, GBP, etc.
+        - Parentheses for negatives: (500.00) → -500.00
+        - Dashes/empty for zeros: -, —, "" → 0.00
+        - European format: 1.234,56 (thousands=., decimal=,)
+        - US/UK format: 1,234.56 (thousands=,, decimal=.)
+        - None values
+        
+        Args:
+            value: Raw cell value (string, number, None)
+            default: Default value if parsing fails
+            
+        Returns:
+            Decimal value or default
+        """
         if value is None:
             return Decimal(default)
+        
         try:
-            return Decimal(str(value).replace(",", ""))
-        except Exception:
+            # Convert to string
+            value_str = str(value).strip()
+            
+            # Handle empty strings, dashes, em-dashes
+            if not value_str or value_str in ("-", "—", "–", ""):
+                return Decimal(default)
+            
+            # Remove currency symbols (common ones)
+            currency_symbols = ["$", "£", "€", "USD", "EUR", "GBP", "AUD", "NZD", "CAD"]
+            for symbol in currency_symbols:
+                value_str = value_str.replace(symbol, "").strip()
+            
+            # Handle parentheses for negatives: (500.00) → -500.00
+            if value_str.startswith("(") and value_str.endswith(")"):
+                value_str = "-" + value_str[1:-1].strip()
+            
+            # Detect locale format by checking for European pattern (thousands=., decimal=,)
+            # European: 1.234,56 or 1.234,56
+            # US/UK: 1,234.56
+            has_european_thousands = re.search(r'\d{1,3}(\.\d{3})+,\d{1,2}$', value_str)
+            has_us_thousands = re.search(r'\d{1,3}(,\d{3})+\.\d{1,2}$', value_str)
+            
+            if has_european_thousands:
+                # European format: remove thousands separator (.), replace decimal (,) with (.)
+                value_str = value_str.replace(".", "").replace(",", ".")
+            elif has_us_thousands:
+                # US/UK format: remove thousands separator (,)
+                value_str = value_str.replace(",", "")
+            else:
+                # No thousands separator, but might have comma as decimal (European)
+                # Check if last comma is decimal separator
+                if "," in value_str and "." not in value_str:
+                    # Likely European: 1234,56
+                    value_str = value_str.replace(",", ".")
+                else:
+                    # Remove any remaining commas (safety)
+                    value_str = value_str.replace(",", "")
+            
+            # Parse to Decimal
+            return Decimal(value_str)
+            
+        except Exception as e:
+            logger.warning(
+                "Failed to parse currency value '%s': %s. Using default: %s",
+                value,
+                e,
+                default
+            )
             return Decimal(default)
+    
+    def _parse_decimal(self, value: Any, default: str = "0.00") -> Decimal:
+        """
+        Legacy method for backward compatibility.
+        Delegates to _parse_currency_value.
+        """
+        return self._parse_currency_value(value, default)
     
     def _get_month_end_date(self, year: int, month: int) -> date:
         """Get the last day of a given month."""
@@ -112,6 +196,174 @@ class XeroDataFetcher:
         else:
             next_month = date(year, month + 1, 1)
             return next_month - timedelta(days=1)
+    
+    def _find_report_section(
+        self, 
+        rows: list, 
+        possible_titles: list[str],
+        row_type: Optional[str] = None
+    ) -> Optional[Any]:
+        """
+        Find a report section by semantic matching instead of exact string match.
+        
+        Handles:
+        - Multiple language variations (Cash, Trésorerie, Efectivo, etc.)
+        - Custom report layouts (user-renamed sections)
+        - RowType filtering (Section, SummaryRow, etc.)
+        
+        Args:
+            rows: List of report rows to search
+            possible_titles: List of possible section titles (case-insensitive)
+            row_type: Optional RowType filter (e.g., "Section")
+            
+        Returns:
+            Matched row object or None
+        """
+        if not rows:
+            return None
+        
+        possible_titles_lower = [title.lower() for title in possible_titles]
+        
+        for row in rows:
+            if not hasattr(row, "rows") or not row.rows:
+                continue
+            
+            # Check RowType if specified
+            if row_type:
+                row_type_attr = getattr(row, "RowType", None)
+                if row_type_attr:
+                    row_type_value = (
+                        row_type_attr.value 
+                        if hasattr(row_type_attr, "value") 
+                        else str(row_type_attr)
+                    )
+                    if row_type_value != row_type:
+                        continue
+            
+            # Get title
+            row_title = ""
+            if hasattr(row, "title"):
+                row_title = str(row.title) if row.title else ""
+            
+            row_title_lower = row_title.lower()
+            
+            # Check if title matches any possible variation
+            for possible_title in possible_titles_lower:
+                if possible_title in row_title_lower or row_title_lower in possible_title:
+                    return row
+            
+            # Also check Attributes for AccountID (semantic matching)
+            if hasattr(row, "Attributes") and row.Attributes:
+                for attr in row.Attributes:
+                    if hasattr(attr, "Value") and attr.Value:
+                        attr_value_lower = str(attr.Value).lower()
+                        for possible_title in possible_titles_lower:
+                            if possible_title in attr_value_lower:
+                                return row
+        
+        return None
+    
+    def _extract_cash_metrics(self, cash_section: Any) -> dict[str, Decimal]:
+        """
+        Extract cash metrics from Cash section using flexible label matching.
+        
+        Handles variations:
+        - "closing bank balance", "closing balance", "bank balance"
+        - "cash spent", "total cash spent", "cash out"
+        - "cash received", "total cash received", "cash in"
+        
+        Args:
+            cash_section: Cash section row object
+            
+        Returns:
+            Dict with cash_position, cash_spent, cash_received
+        """
+        metrics = {
+            "cash_position": Decimal("0.00"),
+            "cash_spent": Decimal("0.00"),
+            "cash_received": Decimal("0.00"),
+        }
+        
+        if not cash_section or not hasattr(cash_section, "rows") or not cash_section.rows:
+            return metrics
+        
+        for nested_row in cash_section.rows:
+            if not hasattr(nested_row, "cells") or not nested_row.cells or len(nested_row.cells) < 2:
+                continue
+            
+            # Safely get label and value
+            label = ""
+            value_str = None
+            
+            if hasattr(nested_row.cells[0], "value") and nested_row.cells[0].value is not None:
+                label = str(nested_row.cells[0].value)
+            else:
+                label = str(nested_row.cells[0]) if nested_row.cells[0] else ""
+            
+            if hasattr(nested_row.cells[1], "value") and nested_row.cells[1].value is not None:
+                value_str = nested_row.cells[1].value
+            else:
+                value_str = str(nested_row.cells[1]) if nested_row.cells[1] else None
+            
+            label_lower = label.lower() if isinstance(label, str) else ""
+            
+            # Flexible matching for closing bank balance
+            if any(term in label_lower for term in ["closing bank balance", "closing balance", "bank balance", "cash position"]):
+                metrics["cash_position"] = self._parse_currency_value(value_str)
+            # Flexible matching for cash spent
+            elif any(term in label_lower for term in ["cash spent", "total cash spent", "cash out", "cash outflow"]):
+                metrics["cash_spent"] = self._parse_currency_value(value_str)
+            # Flexible matching for cash received
+            elif any(term in label_lower for term in ["cash received", "total cash received", "cash in", "cash inflow"]):
+                metrics["cash_received"] = self._parse_currency_value(value_str)
+        
+        return metrics
+    
+    def _extract_profitability_metrics(self, profitability_section: Any) -> dict[str, Decimal]:
+        """
+        Extract profitability metrics from Profitability section.
+        
+        Handles variations:
+        - "expenses", "total expenses", "operating expenses"
+        
+        Args:
+            profitability_section: Profitability section row object
+            
+        Returns:
+            Dict with operating_expenses
+        """
+        metrics = {
+            "operating_expenses": Decimal("0.00"),
+        }
+        
+        if not profitability_section or not hasattr(profitability_section, "rows") or not profitability_section.rows:
+            return metrics
+        
+        for nested_row in profitability_section.rows:
+            if not hasattr(nested_row, "cells") or not nested_row.cells or len(nested_row.cells) < 2:
+                continue
+            
+            # Safely get label and value
+            label = ""
+            value_str = None
+            
+            if hasattr(nested_row.cells[0], "value") and nested_row.cells[0].value is not None:
+                label = str(nested_row.cells[0].value)
+            else:
+                label = str(nested_row.cells[0]) if nested_row.cells[0] else ""
+            
+            if hasattr(nested_row.cells[1], "value") and nested_row.cells[1].value is not None:
+                value_str = nested_row.cells[1].value
+            else:
+                value_str = str(nested_row.cells[1]) if nested_row.cells[1] else None
+            
+            label_lower = label.lower() if isinstance(label, str) else ""
+            
+            # Flexible matching for expenses
+            if any(term in label_lower for term in ["expenses", "total expenses", "operating expenses", "operating costs"]):
+                metrics["operating_expenses"] = self._parse_currency_value(value_str)
+        
+        return metrics
     
     async def fetch_executive_summary(self, report_date: Optional[date] = None) -> dict[str, Any]:
         """
@@ -148,10 +400,25 @@ class XeroDataFetcher:
             if report_date is None:
                 report_date = datetime.now(timezone.utc).date()
             
-            response = self.api.get_report_executive_summary(
-                xero_tenant_id=self.tenant_id,
-                date=report_date,
-            )
+            # Get organization_id for rate limiting (from token)
+            organization_id = self.client.token.organization_id if hasattr(self.client, "token") else None
+            
+            # Rate limit check
+            if organization_id:
+                await self.rate_limiter.wait_if_needed(organization_id)
+            
+            # Execute API call with retry logic
+            async def _fetch():
+                return self.api.get_report_executive_summary(
+                    xero_tenant_id=self.tenant_id,
+                    date=report_date,
+                )
+            
+            response = await self.retry_handler.execute_with_retry(_fetch)
+            
+            # Record API call for rate limiting
+            if organization_id:
+                await self.rate_limiter.record_call(organization_id)
             
             if not hasattr(response, "reports") or not response.reports:
                 logger.warning("No reports found in Executive Summary response")
@@ -167,46 +434,46 @@ class XeroDataFetcher:
             report = response.reports[0]
             rows = report.rows if hasattr(report, "rows") else []
             
-            cash_position = Decimal("0.00")
-            cash_spent = Decimal("0.00")
-            cash_received = Decimal("0.00")
-            operating_expenses = Decimal("0.00")
+            # Use semantic matching to find Cash section
+            cash_section = self._find_report_section(
+                rows,
+                possible_titles=["Cash", "Trésorerie", "Efectivo", "Liquid Assets", "Bank Accounts", "Cash and Bank"],
+                row_type="Section"
+            )
             
-            for row in rows:
-                if not hasattr(row, "rows") or not row.rows:
-                    continue
-                
-                row_title = row.title if hasattr(row, "title") else ""
-                
-                if row_title == "Cash":
-                    for nested_row in row.rows:
-                        if not hasattr(nested_row, "cells") or not nested_row.cells or len(nested_row.cells) < 2:
-                            continue
-                        
-                        label = nested_row.cells[0].value if hasattr(nested_row.cells[0], "value") else str(nested_row.cells[0])
-                        value_str = nested_row.cells[1].value if hasattr(nested_row.cells[1], "value") else str(nested_row.cells[1])
-                        
-                        label_lower = label.lower() if isinstance(label, str) else ""
-                        
-                        if "closing bank balance" in label_lower:
-                            cash_position = self._parse_decimal(value_str)
-                        elif "cash spent" in label_lower:
-                            cash_spent = self._parse_decimal(value_str)
-                        elif "cash received" in label_lower:
-                            cash_received = self._parse_decimal(value_str)
-                
-                elif row_title == "Profitability":
-                    for nested_row in row.rows:
-                        if not hasattr(nested_row, "cells") or not nested_row.cells or len(nested_row.cells) < 2:
-                            continue
-                        
-                        label = nested_row.cells[0].value if hasattr(nested_row.cells[0], "value") else str(nested_row.cells[0])
-                        value_str = nested_row.cells[1].value if hasattr(nested_row.cells[1], "value") else str(nested_row.cells[1])
-                        
-                        label_lower = label.lower() if isinstance(label, str) else ""
-                        
-                        if label_lower == "expenses":
-                            operating_expenses = self._parse_decimal(value_str)
+            cash_metrics = self._extract_cash_metrics(cash_section) if cash_section else {
+                "cash_position": Decimal("0.00"),
+                "cash_spent": Decimal("0.00"),
+                "cash_received": Decimal("0.00"),
+            }
+            
+            if not cash_section:
+                logger.warning(
+                    "Cash section not found in Executive Summary report. "
+                    "This may indicate a non-English locale or custom report layout."
+                )
+            
+            # Use semantic matching to find Profitability section
+            profitability_section = self._find_report_section(
+                rows,
+                possible_titles=["Profitability", "Rentabilité", "Rentabilidad", "Profit", "Performance"],
+                row_type="Section"
+            )
+            
+            profitability_metrics = self._extract_profitability_metrics(profitability_section) if profitability_section else {
+                "operating_expenses": Decimal("0.00"),
+            }
+            
+            if not profitability_section:
+                logger.warning(
+                    "Profitability section not found in Executive Summary report. "
+                    "This may indicate a non-English locale or custom report layout."
+                )
+            
+            cash_position = cash_metrics["cash_position"]
+            cash_spent = cash_metrics["cash_spent"]
+            cash_received = cash_metrics["cash_received"]
+            operating_expenses = profitability_metrics["operating_expenses"]
             
             raw_data = report.to_dict() if hasattr(report, "to_dict") else None
             
@@ -326,32 +593,75 @@ class XeroDataFetcher:
             invoice_type: "ACCREC" for receivables, "ACCPAY" for payables
         
         Returns:
-            Invoice summary with metrics
+            Invoice summary with metrics, including truncated flag
         """
         try:
             all_invoices = []
             page = 1
+            page_size = 1000  # Use maximum page size supported by Xero
+            truncated = False
+            
+            # Get organization_id for rate limiting
+            organization_id = self.client.token.organization_id if hasattr(self.client, "token") else None
             
             while True:
-                response = self.api.get_invoices(
-                    xero_tenant_id=self.tenant_id,
-                    where=f'Type=="{invoice_type}" AND Status=="AUTHORISED"',
-                    page=page,
-                )
+                # Rate limit check before each page
+                if organization_id:
+                    await self.rate_limiter.wait_if_needed(organization_id)
+                
+                # Execute API call with retry logic
+                async def _fetch_page():
+                    try:
+                        # Try with page_size parameter (if SDK supports it)
+                        return self.api.get_invoices(
+                            xero_tenant_id=self.tenant_id,
+                            where=f'Type=="{invoice_type}" AND Status=="AUTHORISED"',
+                            page=page,
+                            # Note: SDK may not support page_size parameter, will use default if not
+                        )
+                    except TypeError:
+                        # SDK doesn't support page_size, use default (100)
+                        return self.api.get_invoices(
+                            xero_tenant_id=self.tenant_id,
+                            where=f'Type=="{invoice_type}" AND Status=="AUTHORISED"',
+                            page=page,
+                        )
+                
+                response = await self.retry_handler.execute_with_retry(_fetch_page)
+                
+                # Record API call for rate limiting
+                if organization_id:
+                    await self.rate_limiter.record_call(organization_id)
+                
+                # Determine page size from response
+                page_invoices = response.invoices if hasattr(response, "invoices") else []
+                if page == 1:
+                    # Use actual page size from first response
+                    page_size = len(page_invoices) if page_invoices else 100
                 
                 page_invoices = response.invoices if hasattr(response, "invoices") else []
                 
                 if not page_invoices:
+                    # No more invoices, pagination complete
                     break
                 
                 all_invoices.extend(page_invoices)
                 
-                if len(page_invoices) < 100:
+                # Check if we've reached the end (fewer invoices than page size)
+                if len(page_invoices) < page_size:
+                    # This is the last page
                     break
                 
                 page += 1
-                if page > 10:
-                    logger.warning("Reached page limit for invoices")
+                
+                # Safety limit: prevent infinite loops (100 pages = 100,000 invoices max)
+                # This is a very high limit, but prevents runaway pagination
+                if page > 100:
+                    logger.warning(
+                        "Reached safety limit for invoice pagination (100 pages). "
+                        "Organization may have more than 100,000 invoices."
+                    )
+                    truncated = True
                     break
             
             total = Decimal("0.00")
@@ -360,11 +670,42 @@ class XeroDataFetcher:
             overdue_days_sum = 0
             today = datetime.now(timezone.utc).date()
             
+            # Track currencies for multi-currency detection
+            currencies_found = set()
+            base_currency = None
+            
             for invoice in all_invoices:
+                # Extract currency code
+                currency_code = None
+                if hasattr(invoice, "currency_code") and invoice.currency_code:
+                    currency_code = str(invoice.currency_code)
+                elif hasattr(invoice, "currency") and invoice.currency:
+                    if hasattr(invoice.currency, "code"):
+                        currency_code = str(invoice.currency.code)
+                    else:
+                        currency_code = str(invoice.currency)
+                
+                if currency_code:
+                    currencies_found.add(currency_code)
+                    # Use first currency as base (typically organization's base currency)
+                    if base_currency is None:
+                        base_currency = currency_code
+                
                 amount_due = self._parse_decimal(
                     invoice.amount_due if hasattr(invoice, "amount_due") else 0
                 )
-                total += amount_due
+                
+                # Only sum amounts in base currency (or if no currency info, assume base)
+                if currency_code is None or currency_code == base_currency:
+                    total += amount_due
+                else:
+                    # Different currency - log warning but don't sum (would be incorrect)
+                    logger.warning(
+                        "Invoice %s has currency %s (base: %s), excluding from total to avoid incorrect aggregation",
+                        getattr(invoice, "invoice_number", "unknown"),
+                        currency_code,
+                        base_currency
+                    )
                 
                 due_date = None
                 if hasattr(invoice, "due_date") and invoice.due_date:
@@ -379,11 +720,13 @@ class XeroDataFetcher:
                         except Exception:
                             pass
                 
+                # Only count overdue in base currency
                 if due_date and due_date < today and amount_due > 0:
-                    overdue_amount += amount_due
-                    overdue_count += 1
-                    days_overdue = (today - due_date).days
-                    overdue_days_sum += days_overdue
+                    if currency_code is None or currency_code == base_currency:
+                        overdue_amount += amount_due
+                        overdue_count += 1
+                        days_overdue = (today - due_date).days
+                        overdue_days_sum += days_overdue
             
             avg_days_overdue = overdue_days_sum / overdue_count if overdue_count > 0 else 0.0
             
@@ -399,6 +742,16 @@ class XeroDataFetcher:
                     else:
                         invoice_status = str(status_obj).split(".")[-1] if "." in str(status_obj) else str(status_obj)
                 
+                # Extract currency code for invoice
+                invoice_currency = None
+                if hasattr(invoice, "currency_code") and invoice.currency_code:
+                    invoice_currency = str(invoice.currency_code)
+                elif hasattr(invoice, "currency") and invoice.currency:
+                    if hasattr(invoice.currency, "code"):
+                        invoice_currency = str(invoice.currency.code)
+                    else:
+                        invoice_currency = str(invoice.currency)
+                
                 invoices.append({
                     "id": str(invoice.invoice_id) if hasattr(invoice, "invoice_id") else None,
                     "number": str(invoice.invoice_number) if hasattr(invoice, "invoice_number") else None,
@@ -407,7 +760,18 @@ class XeroDataFetcher:
                     "total": float(invoice.total) if hasattr(invoice, "total") else 0,
                     "due_date": str(invoice.due_date) if hasattr(invoice, "due_date") else None,
                     "status": invoice_status,
+                    "currency_code": invoice_currency,
                 })
+            
+            # Check for multi-currency issues
+            multi_currency_detected = len(currencies_found) > 1
+            if multi_currency_detected:
+                logger.warning(
+                    "Multi-currency invoices detected (%s). Only %s invoices included in totals. "
+                    "Other currencies excluded to prevent incorrect aggregation.",
+                    ", ".join(currencies_found),
+                    base_currency or "unknown"
+                )
             
             return {
                 "total": float(total),
@@ -416,6 +780,11 @@ class XeroDataFetcher:
                 "overdue_count": overdue_count,
                 "avg_days_overdue": round(avg_days_overdue, 1),
                 "invoices": invoices,
+                "truncated": truncated,
+                "total_fetched": len(all_invoices),
+                "base_currency": base_currency,
+                "multi_currency_detected": multi_currency_detected,
+                "currencies_found": list(currencies_found) if currencies_found else None,
             }
             
         except ApiException as e:
@@ -449,11 +818,26 @@ class XeroDataFetcher:
             end_date = datetime.now(timezone.utc).date()
             start_date = (end_date - timedelta(days=months * 31)).replace(day=1)
             
-            response = self.api.get_report_profit_and_loss(
-                xero_tenant_id=self.tenant_id,
-                from_date=start_date,
-                to_date=end_date,
-            )
+            # Get organization_id for rate limiting
+            organization_id = self.client.token.organization_id if hasattr(self.client, "token") else None
+            
+            # Rate limit check
+            if organization_id:
+                await self.rate_limiter.wait_if_needed(organization_id)
+            
+            # Execute API call with retry logic
+            async def _fetch():
+                return self.api.get_report_profit_and_loss(
+                    xero_tenant_id=self.tenant_id,
+                    from_date=start_date,
+                    to_date=end_date,
+                )
+            
+            response = await self.retry_handler.execute_with_retry(_fetch)
+            
+            # Record API call for rate limiting
+            if organization_id:
+                await self.rate_limiter.record_call(organization_id)
             
             if hasattr(response, "reports") and response.reports:
                 report = response.reports[0]
@@ -627,7 +1011,7 @@ class XeroDataFetcher:
                     await self.client.commit_token_updates()
                 except Exception as e:
                     # P&L is optional, log but don't fail
-                    logger.warning(f"Failed to fetch P&L: {e}")
+                    logger.warning("Failed to fetch P&L: %s", e)
                     profit_loss = {
                         "report_id": None,
                         "report_name": "Profit and Loss",
