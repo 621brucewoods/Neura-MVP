@@ -14,6 +14,7 @@ from app.models.login_attempt import LoginAttempt
 from app.models.refresh_token import RefreshToken
 from app.models.token_blacklist import TokenBlacklist
 from app.models.insight import Insight
+from app.models.insight_feedback import InsightFeedback
 
 __all__ = [
     "User",
@@ -27,5 +28,6 @@ __all__ = [
     "RefreshToken",
     "TokenBlacklist",
     "Insight",
+    "InsightFeedback",
 ]
 

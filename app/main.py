@@ -20,6 +20,7 @@ from app.config import settings
 from app.database import close_db
 from app.integrations.xero.router import router as xero_router
 from app.insights.router import router as insights_router
+from app.feedback.router import router as feedback_router
 
 # Configure logging
 logging.basicConfig(
@@ -119,6 +120,9 @@ def register_routers(app: FastAPI) -> None:
     
     # Insights
     app.include_router(insights_router)
+    
+    # Feedback
+    app.include_router(feedback_router)
 
 
 # Create the application instance

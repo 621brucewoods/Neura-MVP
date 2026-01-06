@@ -5,7 +5,7 @@ API endpoints for financial insights and calculations.
 
 import logging
 from datetime import date, datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -15,11 +15,13 @@ from app.integrations.xero.cache_service import CacheService
 from app.integrations.xero.data_fetcher import XeroDataFetcher
 from app.integrations.xero.sdk_client import create_xero_sdk_client, XeroSDKClientError
 from app.models.user import User
+from app.models.insight import Insight as InsightModel
 from app.insights.service import InsightsService
 from app.insights.schemas import InsightsResponse, Insight
 from app.insights.data_summarizer import DataSummarizer
 from app.insights.insight_generator import InsightGenerator
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, and_, desc, func
 
 logger = logging.getLogger(__name__)
 
@@ -113,14 +115,82 @@ async def get_insights(
             end_date=end_date.isoformat(),
         )
         
+        # Save insights to database
+        generated_at = datetime.now(timezone.utc)
+        saved_insights = []
+        
+        for insight_dict in generated_insights:
+            # Check if insight already exists (same insight_id)
+            stmt = select(InsightModel).where(
+                and_(
+                    InsightModel.insight_id == insight_dict["insight_id"],
+                    InsightModel.organization_id == current_user.organization.id,
+                )
+            )
+            result = await db.execute(stmt)
+            existing = result.scalar_one_or_none()
+            
+            if existing:
+                # Update existing insight (preserve engagement state)
+                existing.title = insight_dict["title"]
+                existing.severity = insight_dict["severity"]
+                existing.confidence_level = insight_dict["confidence_level"]
+                existing.summary = insight_dict["summary"]
+                existing.why_it_matters = insight_dict["why_it_matters"]
+                existing.recommended_actions = insight_dict["recommended_actions"]
+                existing.supporting_numbers = insight_dict.get("supporting_numbers", [])
+                existing.data_notes = insight_dict.get("data_notes")
+                existing.generated_at = generated_at
+                saved_insights.append(existing)
+            else:
+                # Create new insight
+                new_insight = InsightModel(
+                    organization_id=current_user.organization.id,
+                    insight_id=insight_dict["insight_id"],
+                    insight_type=insight_dict["insight_type"],
+                    title=insight_dict["title"],
+                    severity=insight_dict["severity"],
+                    confidence_level=insight_dict["confidence_level"],
+                    summary=insight_dict["summary"],
+                    why_it_matters=insight_dict["why_it_matters"],
+                    recommended_actions=insight_dict["recommended_actions"],
+                    supporting_numbers=insight_dict.get("supporting_numbers", []),
+                    data_notes=insight_dict.get("data_notes"),
+                    generated_at=generated_at,
+                )
+                db.add(new_insight)
+                saved_insights.append(new_insight)
+        
+        await db.commit()
+        
+        # Refresh to get updated data
+        for insight in saved_insights:
+            await db.refresh(insight)
+        
+        # Add engagement state to response
+        insights_with_engagement = []
+        for insight_dict in generated_insights:
+            # Find matching saved insight
+            saved_insight = next(
+                (s for s in saved_insights if s.insight_id == insight_dict["insight_id"]),
+                None,
+            )
+            if saved_insight:
+                insight_dict["is_acknowledged"] = saved_insight.is_acknowledged
+                insight_dict["is_marked_done"] = saved_insight.is_marked_done
+            else:
+                insight_dict["is_acknowledged"] = False
+                insight_dict["is_marked_done"] = False
+            insights_with_engagement.append(insight_dict)
+        
         return InsightsResponse(
             cash_runway=metrics["cash_runway"],
             leading_indicators=metrics["leading_indicators"],
             cash_pressure=metrics["cash_pressure"],
             profitability=metrics["profitability"],
             upcoming_commitments=metrics["upcoming_commitments"],
-            insights=generated_insights,
-            calculated_at=datetime.now(timezone.utc).isoformat(),
+            insights=insights_with_engagement,
+            calculated_at=generated_at.isoformat(),
             raw_data_summary=raw_data_summary,
         )
         
@@ -232,47 +302,224 @@ async def get_insight_detail(
 @router.post(
     "/{insight_id}/acknowledge",
     summary="Acknowledge insight",
-    description="Mark an insight as acknowledged (lightweight engagement tracking).",
+    description="Mark an insight as acknowledged (persists to database).",
 )
 async def acknowledge_insight(
     insight_id: str,
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
     """
     Acknowledge an insight.
     
-    In MVP, this is a lightweight action that doesn't persist state.
-    Future: Store acknowledgment in database for tracking.
+    Updates the insight record in the database to mark it as acknowledged.
     """
-    # For MVP, just return success
-    # Future: Store in database with user_id, insight_id, acknowledged_at
-    return {
-        "success": True,
-        "message": "Insight acknowledged",
-        "insight_id": insight_id,
-    }
+    if not current_user.organization:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User has no organization",
+        )
+    
+    try:
+        # Find insight
+        stmt = select(InsightModel).where(
+            and_(
+                InsightModel.insight_id == insight_id,
+                InsightModel.organization_id == current_user.organization.id,
+            )
+        )
+        result = await db.execute(stmt)
+        insight = result.scalar_one_or_none()
+        
+        if not insight:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Insight with ID {insight_id} not found",
+            )
+        
+        # Update acknowledgment
+        now = datetime.now(timezone.utc)
+        insight.is_acknowledged = True
+        insight.acknowledged_at = now
+        insight.acknowledged_by_user_id = current_user.id
+        
+        await db.commit()
+        await db.refresh(insight)
+        
+        return {
+            "success": True,
+            "message": "Insight acknowledged",
+            "insight_id": insight_id,
+            "acknowledged_at": insight.acknowledged_at.isoformat(),
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.error("Error acknowledging insight: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to acknowledge insight: {str(e)}",
+        )
 
 
 @router.post(
     "/{insight_id}/mark-done",
     summary="Mark insight as done",
-    description="Mark an insight as completed/acted upon.",
+    description="Mark an insight as completed/acted upon (persists to database).",
 )
 async def mark_insight_done(
     insight_id: str,
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
     """
     Mark an insight as done.
     
-    In MVP, this is a lightweight action that doesn't persist state.
-    Future: Store completion in database for tracking.
+    Updates the insight record in the database to mark it as done.
     """
-    # For MVP, just return success
-    # Future: Store in database with user_id, insight_id, marked_done_at
-    return {
-        "success": True,
-        "message": "Insight marked as done",
-        "insight_id": insight_id,
-    }
+    if not current_user.organization:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User has no organization",
+        )
+    
+    try:
+        # Find insight
+        stmt = select(InsightModel).where(
+            and_(
+                InsightModel.insight_id == insight_id,
+                InsightModel.organization_id == current_user.organization.id,
+            )
+        )
+        result = await db.execute(stmt)
+        insight = result.scalar_one_or_none()
+        
+        if not insight:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Insight with ID {insight_id} not found",
+            )
+        
+        # Update marked done
+        now = datetime.now(timezone.utc)
+        insight.is_marked_done = True
+        insight.marked_done_at = now
+        insight.marked_done_by_user_id = current_user.id
+        
+        await db.commit()
+        await db.refresh(insight)
+        
+        return {
+            "success": True,
+            "message": "Insight marked as done",
+            "insight_id": insight_id,
+            "marked_done_at": insight.marked_done_at.isoformat(),
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.error("Error marking insight as done: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to mark insight as done: {str(e)}",
+        )
+
+
+@router.get(
+    "/list",
+    response_model=dict[str, Any],
+    summary="List all insights",
+    description="Get all stored insights with pagination and filtering.",
+)
+async def list_insights(
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    limit: int = Query(20, ge=1, le=100, description="Items per page"),
+    insight_type: Optional[str] = Query(None, description="Filter by insight type"),
+    severity: Optional[str] = Query(None, description="Filter by severity (high, medium, low)"),
+    start_date: Optional[date] = Query(None, description="Filter by start date (generated_at)"),
+    end_date: Optional[date] = Query(None, description="Filter by end date (generated_at)"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
+    """
+    List all stored insights with pagination.
+    
+    Returns insights stored in the database for the user's organization.
+    Supports filtering by type, severity, and date range.
+    """
+    if not current_user.organization:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User has no organization",
+        )
+    
+    try:
+        # Build query
+        stmt = select(InsightModel).where(
+            InsightModel.organization_id == current_user.organization.id
+        )
+        
+        # Apply filters
+        if insight_type:
+            stmt = stmt.where(InsightModel.insight_type == insight_type)
+        if severity:
+            stmt = stmt.where(InsightModel.severity == severity)
+        if start_date:
+            stmt = stmt.where(InsightModel.generated_at >= datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc))
+        if end_date:
+            stmt = stmt.where(InsightModel.generated_at <= datetime.combine(end_date, datetime.max.time()).replace(tzinfo=timezone.utc))
+        
+        # Get total count
+        count_stmt = select(func.count()).select_from(stmt.subquery())
+        total_result = await db.execute(count_stmt)
+        total = total_result.scalar() or 0
+        
+        # Apply pagination and ordering
+        offset = (page - 1) * limit
+        stmt = stmt.order_by(desc(InsightModel.generated_at))
+        stmt = stmt.limit(limit).offset(offset)
+        
+        # Execute query
+        result = await db.execute(stmt)
+        insights = result.scalars().all()
+        
+        # Convert to response format
+        insights_list = []
+        for insight in insights:
+            insights_list.append({
+                "insight_id": insight.insight_id,
+                "insight_type": insight.insight_type,
+                "title": insight.title,
+                "severity": insight.severity,
+                "confidence_level": insight.confidence_level,
+                "summary": insight.summary,
+                "why_it_matters": insight.why_it_matters,
+                "recommended_actions": insight.recommended_actions,
+                "supporting_numbers": insight.supporting_numbers or [],
+                "data_notes": insight.data_notes,
+                "generated_at": insight.generated_at.isoformat(),
+                "is_acknowledged": insight.is_acknowledged,
+                "is_marked_done": insight.is_marked_done,
+            })
+        
+        total_pages = (total + limit - 1) // limit if total > 0 else 0
+        
+        return {
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "total_pages": total_pages,
+            "insights": insights_list,
+        }
+        
+    except Exception as e:
+        logger.error("Error listing insights: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list insights: {str(e)}",
+        )
 

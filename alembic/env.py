@@ -35,6 +35,7 @@ from app.models import (
     RefreshToken,
     TokenBlacklist,
     Insight,
+    InsightFeedback,
 )
 
 # Alembic Config object

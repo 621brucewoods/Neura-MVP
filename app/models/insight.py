@@ -58,6 +58,14 @@ class Insight(Base, UUIDMixin, TimestampMixin):
     )
     
     # Insight identification
+    insight_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        unique=True,
+        index=True,
+        comment="Unique insight identifier (UUID string from generator)",
+    )
+    
     insight_type: Mapped[str] = mapped_column(
         String(50),
         nullable=False,
@@ -187,11 +195,13 @@ class Insight(Base, UUIDMixin, TimestampMixin):
     # Indexes
     __table_args__ = (
         Index("ix_insights_organization_id", "organization_id"),
+        Index("ix_insights_insight_id", "insight_id"),
         Index("ix_insights_insight_type", "insight_type"),
         Index("ix_insights_severity", "severity"),
         Index("ix_insights_generated_at", "generated_at"),
         Index("ix_insights_acknowledged", "is_acknowledged"),
         Index("ix_insights_marked_done", "is_marked_done"),
+        Index("ix_insights_org_insight_id", "organization_id", "insight_id"),
     )
     
     def __repr__(self) -> str:

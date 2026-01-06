@@ -14,6 +14,7 @@ from app.database.base import Base, TimestampMixin, UUIDMixin
 
 if TYPE_CHECKING:
     from app.models.organization import Organization
+    from app.models.insight_feedback import InsightFeedback
 
 
 class User(Base, UUIDMixin, TimestampMixin):
@@ -90,6 +91,13 @@ class User(Base, UUIDMixin, TimestampMixin):
         "Organization",
         back_populates="user",
         uselist=False,
+        lazy="selectin",
+        cascade="all, delete-orphan",
+    )
+    
+    insight_feedback: Mapped[list["InsightFeedback"]] = relationship(
+        "InsightFeedback",
+        back_populates="user",
         lazy="selectin",
         cascade="all, delete-orphan",
     )

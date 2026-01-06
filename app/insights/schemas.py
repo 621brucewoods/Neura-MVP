@@ -110,6 +110,8 @@ class Insight(BaseModel):
     supporting_numbers: list[dict[str, Any]] = Field(default_factory=list, description="Key numbers supporting the insight")
     data_notes: Optional[str] = Field(None, description="Optional notes about data quality or limitations")
     generated_at: str = Field(..., description="ISO timestamp when insight was generated")
+    is_acknowledged: bool = Field(default=False, description="Whether insight has been acknowledged")
+    is_marked_done: bool = Field(default=False, description="Whether insight has been marked as done")
 
 
 class InsightsResponse(BaseModel):
