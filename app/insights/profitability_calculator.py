@@ -158,13 +158,17 @@ class ProfitabilityCalculator:
         cost_of_sales: Optional[float],
         gross_profit: Optional[float]
     ) -> Optional[float]:
-        """Calculate gross margin percentage."""
+        """
+        Calculate gross margin percentage.
+        
+        Uses actual revenue value (not abs) to preserve sign for negative revenue.
+        """
         if gross_profit is not None and revenue is not None and revenue != 0:
-            return float((gross_profit / abs(revenue)) * 100)
+            return float((gross_profit / revenue) * 100)
 
         if revenue is not None and cost_of_sales is not None and revenue != 0:
             gross = revenue - cost_of_sales
-            return float((gross / abs(revenue)) * 100)
+            return float((gross / revenue) * 100)
 
         return None
 
