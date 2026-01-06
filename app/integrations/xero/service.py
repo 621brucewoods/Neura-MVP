@@ -136,13 +136,20 @@ class XeroService:
             # Refresh via Xero API
             token_response = await self.oauth.refresh_tokens(token.refresh_token)
             
+            # Convert scope to space-separated string if it's a list
+            scope_value = token_response.get("scope", token.scope)
+            if isinstance(scope_value, list):
+                scope_str = " ".join(scope_value)
+            else:
+                scope_str = str(scope_value) if scope_value else ""
+            
             # Update stored token
             token_data = XeroTokenData(
                 access_token=token_response["access_token"],
                 refresh_token=token_response["refresh_token"],
                 expires_at=XeroOAuth.calculate_expiry(token_response["expires_in"]),
                 xero_tenant_id=token.xero_tenant_id,
-                scope=token_response.get("scope", token.scope),
+                scope=scope_str,
                 id_token=token_response.get("id_token"),
             )
             
@@ -245,13 +252,20 @@ class XeroService:
         Returns:
             Created or updated XeroToken
         """
+        # Convert scope to space-separated string if it's a list
+        scope_value = token_response.get("scope", "")
+        if isinstance(scope_value, list):
+            scope_str = " ".join(scope_value)
+        else:
+            scope_str = str(scope_value) if scope_value else ""
+        
         token_data = XeroTokenData(
             access_token=token_response["access_token"],
             refresh_token=token_response["refresh_token"],
             expires_at=XeroOAuth.calculate_expiry(token_response["expires_in"]),
             xero_tenant_id=xero_tenant_id,
             token_type=token_response.get("token_type", "Bearer"),
-            scope=token_response.get("scope", ""),
+            scope=scope_str,
             id_token=token_response.get("id_token"),
         )
         

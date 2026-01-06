@@ -3,6 +3,7 @@ Cash Flow Intelligence MVP
 FastAPI Application Entry Point
 """
 
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -19,6 +20,16 @@ from app.config import settings
 from app.database import close_db
 from app.integrations.xero.router import router as xero_router
 from app.insights.router import router as insights_router
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG if settings.debug else logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
+# Temporarily enable DEBUG logging for profitability calculator to trace P&L issues
+logging.getLogger("app.insights.profitability_calculator").setLevel(logging.DEBUG)
 
 
 @asynccontextmanager

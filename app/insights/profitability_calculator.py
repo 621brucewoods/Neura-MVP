@@ -1,5 +1,8 @@
 """
 Profitability calculator for P&L analysis.
+
+Uses structure-based parsing with standardLayout=true for  reliability.
+No synonym matching - relies on RowType and predictable report structure.
 """
 
 import logging
@@ -8,30 +11,6 @@ from typing import Any, Optional
 from app.insights.utils import safe_float, safe_get, safe_list_get, safe_str_lower
 
 logger = logging.getLogger(__name__)
-
-# Synonym map for financial concepts across different locales and terminologies
-FINANCIAL_SYNONYMS = {
-    "revenue": [
-        "revenue", "income", "sales", "turnover", "total income", "trading income",
-        "total revenue", "total sales", "income total", "revenue total",
-        "ventes", "chiffre d'affaires", "recettes"  # French
-    ],
-    "cost_of_sales": [
-        "cost of sales", "cogs", "cost of goods", "cost of goods sold",
-        "total cost of sales", "direct costs", "cost of revenue"
-    ],
-    "gross_profit": [
-        "gross profit", "gross margin", "total gross profit", "gross income"
-    ],
-    "expenses": [
-        "expenses", "operating expenses", "overheads", "costs", "total expenses",
-        "total operating expenses", "operating costs", "operating expenditure"
-    ],
-    "net_profit": [
-        "net profit", "net income", "profit", "total profit", "total net profit",
-        "net profit after tax", "profit (loss)", "surplus (deficit)", "net result"
-    ],
-}
 
 
 class ProfitabilityCalculator:
@@ -42,27 +21,37 @@ class ProfitabilityCalculator:
     """
     
     @staticmethod
-    def _identify_row_intent(label: str) -> Optional[str]:
-        """
-        Identify the financial concept from a label using synonym matching.
-        
-        Args:
-            label: Row label (e.g., "Total Revenue", "Turnover", "Ventes")
-            
-        Returns:
-            Standardized key (e.g., "revenue", "expenses") or None if no match
-        """
-        if not label:
-            return None
-        
-        clean_label = safe_str_lower(label, "").strip()
-        
-        for key, synonyms in FINANCIAL_SYNONYMS.items():
-            for synonym in synonyms:
-                if synonym in clean_label or clean_label in synonym:
-                    return key
-        
-        return None
+    def _get_row_type(row: dict) -> str:
+        """Get row type with PascalCase fallback."""
+        return safe_get(row, "RowType", safe_get(row, "row_type", ""))
+    
+    @staticmethod
+    def _get_cells(row: dict) -> list:
+        """Get cells list with PascalCase fallback."""
+        cells = safe_get(row, "Cells", safe_get(row, "cells", []))
+        return cells if isinstance(cells, list) else []
+    
+    @staticmethod
+    def _get_cell_value(cell: dict, default: str = "") -> str:
+        """Get cell value with PascalCase fallback."""
+        return safe_get(cell, "Value", safe_get(cell, "value", default))
+    
+    @staticmethod
+    def _get_nested_rows(row: dict) -> list:
+        """Get nested rows with PascalCase fallback."""
+        nested = safe_get(row, "Rows", safe_get(row, "rows", []))
+        return nested if isinstance(nested, list) else []
+    
+    @staticmethod
+    def _get_title(row: dict) -> str:
+        """Get title with PascalCase fallback."""
+        return safe_get(row, "Title", safe_get(row, "title", ""))
+    
+    @staticmethod
+    def _get_summary_row(section: dict) -> Optional[dict]:
+        """Extract SummaryRow from a Section, handling PascalCase/lowercase."""
+        summary = safe_get(section, "SummaryRow", safe_get(section, "summary_row"))
+        return summary if isinstance(summary, dict) else None
     
     @staticmethod
     def _find_target_column_index(rows: list) -> int:
@@ -85,12 +74,12 @@ class ProfitabilityCalculator:
             if not isinstance(row, dict):
                 continue
             
-            row_type = safe_get(row, "row_type", "")
+            row_type = ProfitabilityCalculator._get_row_type(row)
             if row_type != "Header":
                 continue
             
-            cells = safe_get(row, "cells", [])
-            if not isinstance(cells, list) or len(cells) < 2:
+            cells = ProfitabilityCalculator._get_cells(row)
+            if len(cells) < 2:
                 continue
             
             # Look for the first data column (skip empty first column)
@@ -98,7 +87,7 @@ class ProfitabilityCalculator:
             for i in range(1, len(cells)):
                 cell = safe_list_get(cells, i)
                 if isinstance(cell, dict):
-                    value = safe_get(cell, "value", "")
+                    value = ProfitabilityCalculator._get_cell_value(cell)
                     if value and value.strip():
                         # Found a column with data, use it
                         return i
@@ -112,10 +101,17 @@ class ProfitabilityCalculator:
     @staticmethod
     def _extract_pnl_values(pnl_data: Optional[dict[str, Any]]) -> dict[str, Any]:
         """
-        Extract key values from P&L report structure.
+        Extract key values from P&L report structure using structure-based parsing.
+        
+        Relies on standardLayout=true to ensure predictable structure:
+        - Revenue: First Section's SummaryRow
+        - Cost of Sales: Second Section's SummaryRow
+        - Gross Profit: Standalone SummaryRow with label "Gross Profit" (Xero hard-codes this)
+        - Expenses: Third Section's SummaryRow (Operating Expenses)
+        - Net Profit: Last SummaryRow in the entire report
         
         Args:
-            pnl_data: Raw P&L data from Xero
+            pnl_data: Raw P&L data from Xero (must use standardLayout=true)
         
         Returns:
             Dictionary with extracted values
@@ -133,179 +129,174 @@ class ProfitabilityCalculator:
         if not isinstance(raw_data, dict):
             raw_data = {}
         
-        rows = safe_get(raw_data, "rows", [])
+        # Xero API uses "Rows" (PascalCase), try both for compatibility
+        rows = safe_get(raw_data, "Rows", safe_get(raw_data, "rows", []))
         if not isinstance(rows, list):
             rows = []
         
         # Find target column index from header
         target_col_index = ProfitabilityCalculator._find_target_column_index(rows)
+        logger.info("[P&L] Target column index: %s, Total rows: %s", target_col_index, len(rows))
         
+        # Initialize all values
         revenue = None
         cost_of_sales = None
         gross_profit = None
         expenses = None
         net_profit = None
         
-        def _find_value_in_rows(rows_list: list, target_key: str, prefer_total: bool = True) -> Optional[float]:
-            """
-            Recursively search for value in P&L rows using semantic matching.
-            
-            Collects ALL matching values, then returns the best one based on priority:
-            1. SummaryRow (always preferred when prefer_total=True)
-            2. Row with "total" in label
-            3. Any other matching Row
-            
-            Args:
-                rows_list: List of row dictionaries
-                target_key: Target financial concept key (e.g., "revenue", "expenses")
-                prefer_total: If True, prefer SummaryRow (totals) over individual rows
-            """
+        # Collect all Sections, SummaryRows, and Rows for structure-based parsing
+        sections = []
+        all_summary_rows = []
+        all_rows = []  # Collect all Row types for fallback when SummaryRow doesn't exist
+        
+        def _collect_structure(rows_list: list, depth: int = 0):
+            """Recursively collect Sections, SummaryRows, and Rows from the report structure."""
             if not isinstance(rows_list, list):
-                return None
-            
-            found_values = []
+                return
             
             for row in rows_list:
                 if not isinstance(row, dict):
                     continue
                 
-                row_type = safe_get(row, "row_type", "")
-                cells = safe_get(row, "cells", [])
-                if not isinstance(cells, list):
-                    cells = []
+                row_type = ProfitabilityCalculator._get_row_type(row)
                 
-                # Get label from appropriate location based on row_type
-                label = ""
                 if row_type == "Section":
-                    # Section rows have label in title
-                    label = safe_str_lower(safe_get(row, "title"), "")
-                elif row_type in ["SummaryRow", "Row"]:
-                    # SummaryRow/Row have label in first cell
-                    if len(cells) > 0:
-                        label_cell = safe_list_get(cells, 0)
-                        if isinstance(label_cell, dict):
-                            label = safe_str_lower(safe_get(label_cell, "value", ""), "")
-                else:
-                    # Fallback: try both title and first cell (handles empty-title sections)
-                    title_label = safe_str_lower(safe_get(row, "title"), "")
-                    cell_label = ""
-                    if len(cells) > 0:
-                        label_cell = safe_list_get(cells, 0)
-                        if isinstance(label_cell, dict):
-                            cell_label = safe_str_lower(safe_get(label_cell, "value", ""), "")
-                    label = title_label or cell_label
+                    sections.append(row)
+                    # Also collect SummaryRow from this section if it exists
+                    summary_row = ProfitabilityCalculator._get_summary_row(row)
+                    if summary_row:
+                        all_summary_rows.append(summary_row)
                 
-                # Use semantic matching to identify if this row itself matches target
-                row_intent = ProfitabilityCalculator._identify_row_intent(label)
+                elif row_type == "SummaryRow":
+                    # Standalone SummaryRow (not nested in a Section)
+                    all_summary_rows.append(row)
                 
-                # Check if this row itself matches (only for non-Section rows, Sections are containers)
-                if row_intent == target_key and row_type != "Section":
-                    # Extract value from target column (not hard-coded index 1)
-                    if len(cells) > target_col_index:
-                        value_cell = safe_list_get(cells, target_col_index)
-                        if isinstance(value_cell, dict):
-                            value_str = safe_get(value_cell, "value", "0")
-                            value = safe_float(value_str)
-                            # Accept zero values (they're valid)
-                            if value is not None:
-                                # Determine priority: SummaryRow is ALWAYS highest priority
-                                is_summary_row = (row_type == "SummaryRow")
-                                has_total_in_label = ("total" in label)
-                                # Priority: 2 = SummaryRow, 1 = has "total", 0 = regular row
-                                priority = 2 if is_summary_row else (1 if has_total_in_label else 0)
-                                found_values.append((value, priority))
+                elif row_type == "Row":
+                    # Regular Row type (used when SummaryRow doesn't exist)
+                    all_rows.append(row)
                 
-                # ALWAYS search nested rows (even if current row doesn't match)
-                # This handles empty-title Sections and ensures we find all matches
-                nested_rows = safe_get(row, "rows", [])
-                if isinstance(nested_rows, list) and nested_rows:
-                    # Process nested rows directly (not recursive call) to maintain priority information
-                    for nested_row in nested_rows:
-                        if not isinstance(nested_row, dict):
-                            continue
-                        
-                        nested_row_type = safe_get(nested_row, "row_type", "")
-                        nested_cells = safe_get(nested_row, "cells", [])
-                        if not isinstance(nested_cells, list):
-                            nested_cells = []
-                        
-                        # Get nested row label
-                        nested_label = ""
-                        if nested_row_type in ["SummaryRow", "Row"]:
-                            if len(nested_cells) > 0:
-                                nested_label_cell = safe_list_get(nested_cells, 0)
-                                if isinstance(nested_label_cell, dict):
-                                    nested_label = safe_str_lower(safe_get(nested_label_cell, "value", ""), "")
-                        
-                        # Check if nested row matches
-                        nested_intent = ProfitabilityCalculator._identify_row_intent(nested_label)
-                        if nested_intent == target_key:
-                            # Extract value from nested row
-                            if len(nested_cells) > target_col_index:
-                                nested_value_cell = safe_list_get(nested_cells, target_col_index)
-                                if isinstance(nested_value_cell, dict):
-                                    nested_value_str = safe_get(nested_value_cell, "value", "0")
-                                    nested_value = safe_float(nested_value_str)
-                                    if nested_value is not None:
-                                        # Determine priority: SummaryRow is ALWAYS highest
-                                        is_summary = (nested_row_type == "SummaryRow")
-                                        has_total = ("total" in nested_label)
-                                        priority = 2 if is_summary else (1 if has_total else 0)
-                                        found_values.append((nested_value, priority))
-                        
-                        # Recursively search deeper nested rows (for multi-level nesting)
-                        deeper_nested = safe_get(nested_row, "rows", [])
-                        if isinstance(deeper_nested, list) and deeper_nested:
-                            # Recursive call for deeper nesting - collect all matches
-                            for deeper_row in deeper_nested:
-                                if not isinstance(deeper_row, dict):
-                                    continue
-                                
-                                deeper_row_type = safe_get(deeper_row, "row_type", "")
-                                deeper_cells = safe_get(deeper_row, "cells", [])
-                                if not isinstance(deeper_cells, list):
-                                    deeper_cells = []
-                                
-                                deeper_label = ""
-                                if deeper_row_type in ["SummaryRow", "Row"]:
-                                    if len(deeper_cells) > 0:
-                                        deeper_label_cell = safe_list_get(deeper_cells, 0)
-                                        if isinstance(deeper_label_cell, dict):
-                                            deeper_label = safe_str_lower(safe_get(deeper_label_cell, "value", ""), "")
-                                
-                                deeper_intent = ProfitabilityCalculator._identify_row_intent(deeper_label)
-                                if deeper_intent == target_key:
-                                    if len(deeper_cells) > target_col_index:
-                                        deeper_value_cell = safe_list_get(deeper_cells, target_col_index)
-                                        if isinstance(deeper_value_cell, dict):
-                                            deeper_value_str = safe_get(deeper_value_cell, "value", "0")
-                                            deeper_value = safe_float(deeper_value_str)
-                                            if deeper_value is not None:
-                                                is_deeper_summary = (deeper_row_type == "SummaryRow")
-                                                has_deeper_total = ("total" in deeper_label)
-                                                deeper_priority = 2 if is_deeper_summary else (1 if has_deeper_total else 0)
-                                                found_values.append((deeper_value, deeper_priority))
-            
-            if not found_values:
-                return None
-            
-            # Sort by priority (highest first): SummaryRow > "total" in label > regular row
-            found_values.sort(key=lambda x: x[1], reverse=True)
-            
-            # If prefer_total, return the highest priority value (SummaryRow if available)
-            if prefer_total:
-                # Return the highest priority value (SummaryRow preferred)
-                return found_values[0][0]
-            
-            # Return the first value found (already sorted by priority)
-            return found_values[0][0]
+                # Recursively search nested rows
+                nested_rows = ProfitabilityCalculator._get_nested_rows(row)
+                if nested_rows:
+                    _collect_structure(nested_rows, depth + 1)
         
-        # Use semantic matching with synonym map (handles different locales and terminologies)
-        revenue = _find_value_in_rows(rows, "revenue", prefer_total=True)
-        cost_of_sales = _find_value_in_rows(rows, "cost_of_sales", prefer_total=True)
-        gross_profit = _find_value_in_rows(rows, "gross_profit", prefer_total=True)
-        expenses = _find_value_in_rows(rows, "expenses", prefer_total=True)
-        net_profit = _find_value_in_rows(rows, "net_profit", prefer_total=True)
+        _collect_structure(rows)
+        logger.info("[P&L] Found %s Sections, %s SummaryRows, and %s Rows", 
+                    len(sections), len(all_summary_rows), len(all_rows))
+                
+        # Extract value from a row (SummaryRow or Row) at target column
+        def _extract_value_from_row(row: dict) -> Optional[float]:
+            """Extract numeric value from SummaryRow or Row at target column."""
+            cells = ProfitabilityCalculator._get_cells(row)
+            if len(cells) > target_col_index:
+                value_cell = safe_list_get(cells, target_col_index)
+                if isinstance(value_cell, dict):
+                    value_str = ProfitabilityCalculator._get_cell_value(value_cell, "0")
+                    return safe_float(value_str)
+            return None
+            
+        # Get label from a row (for matching specific labels like "Gross Profit")
+        def _get_row_label(row: dict) -> str:
+            """Extract label from row's first cell."""
+            cells = ProfitabilityCalculator._get_cells(row)
+            if len(cells) > 0:
+                label_cell = safe_list_get(cells, 0)
+                if isinstance(label_cell, dict):
+                    return ProfitabilityCalculator._get_cell_value(label_cell, "")
+            return ""
+            
+        # 1. REVENUE: First Section's SummaryRow or nested Row
+        if len(sections) >= 1:
+            first_section = sections[0]
+            # Try SummaryRow first
+            first_section_summary = ProfitabilityCalculator._get_summary_row(first_section)
+            if first_section_summary:
+                revenue = _extract_value_from_row(first_section_summary)
+                logger.info("[P&L] Revenue (1st Section SummaryRow): %s", revenue)
+            else:
+                # Fallback: Look for Row with "Revenue" or "Income" in label within first section
+                nested_rows = ProfitabilityCalculator._get_nested_rows(first_section)
+                for nested_row in nested_rows:
+                    if ProfitabilityCalculator._get_row_type(nested_row) == "Row":
+                        label = safe_str_lower(_get_row_label(nested_row), "")
+                        if "revenue" in label or "income" in label or "sales" in label:
+                            revenue = _extract_value_from_row(nested_row)
+                            logger.info("[P&L] Revenue (1st Section Row with label '%s'): %s", _get_row_label(nested_row), revenue)
+                            break
+        
+        # 2. COST OF SALES: Second Section's SummaryRow or nested Row
+        if len(sections) >= 2:
+            second_section = sections[1]
+            # Try SummaryRow first
+            second_section_summary = ProfitabilityCalculator._get_summary_row(second_section)
+            if second_section_summary:
+                cost_of_sales = _extract_value_from_row(second_section_summary)
+                logger.info("[P&L] Cost of Sales (2nd Section SummaryRow): %s", cost_of_sales)
+            else:
+                # Fallback: Look for Row with "Cost" in label within second section
+                nested_rows = ProfitabilityCalculator._get_nested_rows(second_section)
+                for nested_row in nested_rows:
+                    if ProfitabilityCalculator._get_row_type(nested_row) == "Row":
+                        label = safe_str_lower(_get_row_label(nested_row), "")
+                        if "cost" in label or "cogs" in label:
+                            cost_of_sales = _extract_value_from_row(nested_row)
+                            logger.info("[P&L] Cost of Sales (2nd Section Row with label '%s'): %s", _get_row_label(nested_row), cost_of_sales)
+                            break
+        
+        # 3. GROSS PROFIT: SummaryRow or Row with label "Gross Profit" (Xero hard-codes this)
+        # Check SummaryRows first
+        for summary_row in all_summary_rows:
+            label = safe_str_lower(_get_row_label(summary_row), "")
+            if label == "gross profit":
+                gross_profit = _extract_value_from_row(summary_row)
+                logger.info("[P&L] Gross Profit (SummaryRow with label 'Gross Profit'): %s", gross_profit)
+                break
+        else:
+            # Fallback: Check Rows if not found in SummaryRows
+            for row in all_rows:
+                label = safe_str_lower(_get_row_label(row), "")
+                if label == "gross profit":
+                    gross_profit = _extract_value_from_row(row)
+                    logger.info("[P&L] Gross Profit (Row with label 'Gross Profit'): %s", gross_profit)
+                    break
+        
+        # 4. EXPENSES: Third Section's SummaryRow or nested Row
+        if len(sections) >= 3:
+            third_section = sections[2]
+            # Try SummaryRow first
+            third_section_summary = ProfitabilityCalculator._get_summary_row(third_section)
+            if third_section_summary:
+                expenses = _extract_value_from_row(third_section_summary)
+                logger.info("[P&L] Expenses (3rd Section SummaryRow): %s", expenses)
+            else:
+                # Fallback: Look for Row with "Expense" in label within third section
+                nested_rows = ProfitabilityCalculator._get_nested_rows(third_section)
+                for nested_row in nested_rows:
+                    if ProfitabilityCalculator._get_row_type(nested_row) == "Row":
+                        label = safe_str_lower(_get_row_label(nested_row), "")
+                        if "expense" in label or "cost" in label:
+                            expenses = _extract_value_from_row(nested_row)
+                            logger.info("[P&L] Expenses (3rd Section Row with label '%s'): %s", _get_row_label(nested_row), expenses)
+                            break
+        
+        # 5. NET PROFIT: Last SummaryRow or Row in the entire report (final total)
+        # Try SummaryRows first
+        if all_summary_rows:
+            last_summary = all_summary_rows[-1]
+            net_profit = _extract_value_from_row(last_summary)
+            logger.info("[P&L] Net Profit (Last SummaryRow): %s", net_profit)
+        elif all_rows:
+            # Fallback: Look for "Net Income" or "Net Profit" in Rows
+            for row in reversed(all_rows):  # Check from end backwards
+                label = safe_str_lower(_get_row_label(row), "")
+                if "net income" in label or "net profit" in label or label == "net income":
+                    net_profit = _extract_value_from_row(row)
+                    logger.info("[P&L] Net Profit (Row with label '%s'): %s", _get_row_label(row), net_profit)
+                    break
+        
+        logger.info("[P&L] Extraction complete: revenue=%s, cost_of_sales=%s, gross_profit=%s, expenses=%s, net_profit=%s",
+                    revenue, cost_of_sales, gross_profit, expenses, net_profit)
         
         return {
             "revenue": revenue,
@@ -388,6 +379,7 @@ class ProfitabilityCalculator:
     @staticmethod
     def calculate(
         profit_loss_data: Optional[dict[str, Any]],
+        trial_balance_pnl: Optional[dict[str, Any]],
         executive_summary_current: dict[str, Any],
         executive_summary_history: list[dict[str, Any]]
     ) -> dict[str, Any]:
@@ -403,6 +395,34 @@ class ProfitabilityCalculator:
             Dictionary with profitability metrics
         """
         pnl_values = ProfitabilityCalculator._extract_pnl_values(profit_loss_data)
+        logger.info("[Profitability] P&L extraction result: revenue=%s, cost_of_sales=%s, gross_profit=%s, expenses=%s, net_profit=%s",
+                    pnl_values.get("revenue"), pnl_values.get("cost_of_sales"), pnl_values.get("gross_profit"),
+                    pnl_values.get("expenses"), pnl_values.get("net_profit"))
+        
+        # Merge with Trial Balance P&L if available (deterministic by AccountType)
+        if isinstance(trial_balance_pnl, dict):
+            logger.info("[Profitability] Trial Balance P&L available: %s", trial_balance_pnl)
+            for key in ["revenue", "cost_of_sales", "expenses"]:
+                tb_value = trial_balance_pnl.get(key)
+                # Use Trial Balance value if it exists (including 0.0, which is valid)
+                # Only skip if the key doesn't exist in the dict (None from .get() when key missing)
+                if key in trial_balance_pnl:
+                    pnl_values[key] = tb_value
+                    logger.info("[Profitability] Using Trial Balance %s: %s (was: %s)", key, tb_value, pnl_values.get(key))
+        else:
+            logger.warning("[Profitability] Trial Balance P&L not available or invalid: %s", type(trial_balance_pnl))
+        
+        # Derive missing gross_profit and net_profit using math (deterministic)
+        if pnl_values.get("gross_profit") is None:
+            if pnl_values.get("revenue") is not None and pnl_values.get("cost_of_sales") is not None:
+                pnl_values["gross_profit"] = pnl_values["revenue"] - pnl_values["cost_of_sales"]
+        
+        if pnl_values.get("net_profit") is None:
+            if pnl_values.get("gross_profit") is not None and pnl_values.get("expenses") is not None:
+                pnl_values["net_profit"] = pnl_values["gross_profit"] - pnl_values["expenses"]
+            elif pnl_values.get("revenue") is not None and pnl_values.get("expenses") is not None:
+                # Fallback: revenue minus expenses if cost_of_sales missing
+                pnl_values["net_profit"] = pnl_values["revenue"] - pnl_values["expenses"]
         
         gross_margin = ProfitabilityCalculator.calculate_gross_margin(
             revenue=pnl_values["revenue"],
@@ -415,12 +435,17 @@ class ProfitabilityCalculator:
             executive_summary_history
         )
         
+        # Determine risk level based on available data
         risk_level = "low"
-        if gross_margin is not None and gross_margin < 20:
+        if gross_margin is not None:
+            if gross_margin < 20:
+                risk_level = "high"
+            elif gross_margin < 30:
+                risk_level = "medium"
+        # Consider net profit losses even if gross margin is high
+        if pnl_values.get("net_profit") is not None and pnl_values["net_profit"] < 0:
             risk_level = "high"
-        elif gross_margin is not None and gross_margin < 30:
-            risk_level = "medium"
-        elif profit_trend == "declining":
+        elif profit_trend == "declining" and risk_level == "low":
             risk_level = "medium"
         
         return {

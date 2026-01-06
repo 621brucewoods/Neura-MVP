@@ -74,7 +74,7 @@ async def get_insights(
         )
         
         # Calculate insights from fetched data
-        insights = InsightsService.calculate_all_insights(financial_data)
+        insights = InsightsService.calculate_all_insights(financial_data, data_fetcher)
         
         return InsightsResponse(
             cash_runway=insights["cash_runway"],

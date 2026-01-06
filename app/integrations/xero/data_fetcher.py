@@ -2,7 +2,7 @@
 Xero Data Fetcher
 Fetches financial data from Xero API using the official SDK.
 
-Primary data source: Executive Summary Report (accurate cash flow metrics).
+Primary data source: Standard Balance Sheet & Profit Loss (Deterministic).
 """
 
 import logging
@@ -80,10 +80,8 @@ class XeroDataFetchError(Exception):
 
 class XeroDataFetcher:
     """
-    Fetches financial data from Xero using the official SDK.
-    
-    Primary focus: Executive Summary Report for accurate cash flow metrics.
-    Provides clean, normalized data structures for cash runway calculations.
+    Fetches financial data from Xero using Standard Reports.
+    Prioritizes 'standardLayout=true' for deterministic parsing.
     """
     
     def __init__(
@@ -189,218 +187,129 @@ class XeroDataFetcher:
         """
         return self._parse_currency_value(value, default)
     
-    def _get_month_end_date(self, year: int, month: int) -> date:
-        """Get the last day of a given month."""
-        if month == 12:
-            return date(year, 12, 31)
-        else:
-            next_month = date(year, month + 1, 1)
-            return next_month - timedelta(days=1)
+    def _get_month_end(self, target_date: date) -> date:
+        """Return the last day of the month for the given date."""
+        next_month = target_date.replace(day=28) + timedelta(days=4)
+        return next_month - timedelta(days=next_month.day)
     
-    def _find_report_section(
-        self, 
-        rows: list, 
-        possible_titles: list[str],
-        row_type: Optional[str] = None
-    ) -> Optional[Any]:
+    def _calculate_months_ago(self, target_date: date, months: int) -> date:
         """
-        Find a report section by semantic matching instead of exact string match.
+        Calculate date that is N months ago from target date.
         
-        Handles:
-        - Multiple language variations (Cash, Trésorerie, Efectivo, etc.)
-        - Custom report layouts (user-renamed sections)
-        - RowType filtering (Section, SummaryRow, etc.)
+        Handles month-end edge cases (e.g., Jan 31 - 1 month = Feb 28/29).
         
         Args:
-            rows: List of report rows to search
-            possible_titles: List of possible section titles (case-insensitive)
-            row_type: Optional RowType filter (e.g., "Section")
+            target_date: Reference date
+            months: Number of months to go back
             
         Returns:
-            Matched row object or None
+            Date that is months months before target_date
         """
-        if not rows:
+        # Calculate target year and month
+        target_year = target_date.year
+        target_month = target_date.month
+        target_day = target_date.day
+        
+        # Subtract months
+        result_month = target_month - months
+        result_year = target_year
+        
+        # Handle year rollover
+        while result_month <= 0:
+            result_month += 12
+            result_year -= 1
+        
+        # Handle month-end edge cases (e.g., Jan 31 - 1 month should be Dec 31, not Dec 31+)
+        # Get the last day of the target month
+        if result_month == 2:
+            # February: check for leap year
+            if result_year % 4 == 0 and (result_year % 100 != 0 or result_year % 400 == 0):
+                max_day = 29
+            else:
+                max_day = 28
+        elif result_month in [4, 6, 9, 11]:
+            max_day = 30
+        else:
+            max_day = 31
+        
+        # Use the minimum of target day and max day for the result month
+        result_day = min(target_day, max_day)
+        
+        return date(result_year, result_month, result_day)
+    
+    def extract_cash_from_balance_sheet(self, balance_sheet: dict[str, Any]) -> Optional[float]:
+        """
+        Extract cash position from Balance Sheet.
+        
+        Looks for "Total Cash and Cash Equivalents" SummaryRow in the Balance Sheet.
+        Uses the first data column (typically index 1).
+        
+        Args:
+            balance_sheet: Balance Sheet data structure
+            
+        Returns:
+            Cash position as float, or None if not found
+        """
+        if not balance_sheet or not isinstance(balance_sheet, dict):
             return None
         
-        possible_titles_lower = [title.lower() for title in possible_titles]
+        raw_data = balance_sheet.get("raw_data", {})
+        if not isinstance(raw_data, dict):
+            return None
         
-        for row in rows:
-            if not hasattr(row, "rows") or not row.rows:
-                continue
-            
-            # Check RowType if specified
-            if row_type:
-                row_type_attr = getattr(row, "RowType", None)
-                if row_type_attr:
-                    row_type_value = (
-                        row_type_attr.value 
-                        if hasattr(row_type_attr, "value") 
-                        else str(row_type_attr)
-                    )
-                    if row_type_value != row_type:
-                        continue
-            
-            # Get title
-            row_title = ""
-            if hasattr(row, "title"):
-                row_title = str(row.title) if row.title else ""
-            
-            row_title_lower = row_title.lower()
-            
-            # Check if title matches any possible variation
-            for possible_title in possible_titles_lower:
-                if possible_title in row_title_lower or row_title_lower in possible_title:
-                    return row
-            
-            # Also check Attributes for AccountID (semantic matching)
-            if hasattr(row, "Attributes") and row.Attributes:
-                for attr in row.Attributes:
-                    if hasattr(attr, "Value") and attr.Value:
-                        attr_value_lower = str(attr.Value).lower()
-                        for possible_title in possible_titles_lower:
-                            if possible_title in attr_value_lower:
-                                return row
+        # Xero API uses "Rows" (PascalCase), try both for compatibility
+        rows = raw_data.get("Rows", raw_data.get("rows", []))
+        if not isinstance(rows, list):
+            return None
         
-        return None
+        # Recursively search for "Total Cash and Cash Equivalents" SummaryRow
+        def _search_rows(rows_list: list) -> Optional[float]:
+            for row in rows_list:
+                if not isinstance(row, dict):
+                    continue
+                
+                # Xero API uses PascalCase (RowType, Title, Rows, Cells, Value), try both
+                row_type = row.get("RowType", row.get("row_type", ""))
+                
+                # Check if this is a SummaryRow with "Total Cash" in label
+                if row_type == "SummaryRow":
+                    cells = row.get("Cells", row.get("cells", []))
+                    if isinstance(cells, list) and len(cells) >= 2:
+                        first_cell = cells[0]
+                        if isinstance(first_cell, dict):
+                            label = str(first_cell.get("Value", first_cell.get("value", ""))).lower()
+                            if "total" in label and "cash" in label:
+                                # Found it! Extract value from second cell (index 1)
+                                value_cell = cells[1]
+                                if isinstance(value_cell, dict):
+                                    value_str = value_cell.get("Value", value_cell.get("value", ""))
+                                    parsed = self._parse_currency_value(value_str, "0.00")
+                                    return float(parsed)
+                
+                # Recursively search nested rows
+                nested_rows = row.get("Rows", row.get("rows", []))
+                if isinstance(nested_rows, list):
+                    result = _search_rows(nested_rows)
+                    if result is not None:
+                        return result
+            
+            return None
+        
+        return _search_rows(rows)
     
-    def _extract_cash_metrics(self, cash_section: Any) -> dict[str, Decimal]:
+    async def fetch_balance_sheet(self, report_date: date) -> dict[str, Any]:
         """
-        Extract cash metrics from Cash section using flexible label matching.
-        
-        Handles variations:
-        - "closing bank balance", "closing balance", "bank balance"
-        - "cash spent", "total cash spent", "cash out"
-        - "cash received", "total cash received", "cash in"
+        Fetch Standard Balance Sheet (Liquidity Source of Truth).
+        Uses standardLayout=true to ignore user customizations.
         
         Args:
-            cash_section: Cash section row object
+            report_date: Date for the balance sheet snapshot
             
         Returns:
-            Dict with cash_position, cash_spent, cash_received
-        """
-        metrics = {
-            "cash_position": Decimal("0.00"),
-            "cash_spent": Decimal("0.00"),
-            "cash_received": Decimal("0.00"),
-        }
-        
-        if not cash_section or not hasattr(cash_section, "rows") or not cash_section.rows:
-            return metrics
-        
-        for nested_row in cash_section.rows:
-            if not hasattr(nested_row, "cells") or not nested_row.cells or len(nested_row.cells) < 2:
-                continue
-            
-            # Safely get label and value
-            label = ""
-            value_str = None
-            
-            if hasattr(nested_row.cells[0], "value") and nested_row.cells[0].value is not None:
-                label = str(nested_row.cells[0].value)
-            else:
-                label = str(nested_row.cells[0]) if nested_row.cells[0] else ""
-            
-            if hasattr(nested_row.cells[1], "value") and nested_row.cells[1].value is not None:
-                value_str = nested_row.cells[1].value
-            else:
-                value_str = str(nested_row.cells[1]) if nested_row.cells[1] else None
-            
-            label_lower = label.lower() if isinstance(label, str) else ""
-            
-            # Flexible matching for closing bank balance
-            if any(term in label_lower for term in ["closing bank balance", "closing balance", "bank balance", "cash position"]):
-                metrics["cash_position"] = self._parse_currency_value(value_str)
-            # Flexible matching for cash spent
-            elif any(term in label_lower for term in ["cash spent", "total cash spent", "cash out", "cash outflow"]):
-                metrics["cash_spent"] = self._parse_currency_value(value_str)
-            # Flexible matching for cash received
-            elif any(term in label_lower for term in ["cash received", "total cash received", "cash in", "cash inflow"]):
-                metrics["cash_received"] = self._parse_currency_value(value_str)
-        
-        return metrics
-    
-    def _extract_profitability_metrics(self, profitability_section: Any) -> dict[str, Decimal]:
-        """
-        Extract profitability metrics from Profitability section.
-        
-        Handles variations:
-        - "expenses", "total expenses", "operating expenses"
-        
-        Args:
-            profitability_section: Profitability section row object
-            
-        Returns:
-            Dict with operating_expenses
-        """
-        metrics = {
-            "operating_expenses": Decimal("0.00"),
-        }
-        
-        if not profitability_section or not hasattr(profitability_section, "rows") or not profitability_section.rows:
-            return metrics
-        
-        for nested_row in profitability_section.rows:
-            if not hasattr(nested_row, "cells") or not nested_row.cells or len(nested_row.cells) < 2:
-                continue
-            
-            # Safely get label and value
-            label = ""
-            value_str = None
-            
-            if hasattr(nested_row.cells[0], "value") and nested_row.cells[0].value is not None:
-                label = str(nested_row.cells[0].value)
-            else:
-                label = str(nested_row.cells[0]) if nested_row.cells[0] else ""
-            
-            if hasattr(nested_row.cells[1], "value") and nested_row.cells[1].value is not None:
-                value_str = nested_row.cells[1].value
-            else:
-                value_str = str(nested_row.cells[1]) if nested_row.cells[1] else None
-            
-            label_lower = label.lower() if isinstance(label, str) else ""
-            
-            # Flexible matching for expenses
-            if any(term in label_lower for term in ["expenses", "total expenses", "operating expenses", "operating costs"]):
-                metrics["operating_expenses"] = self._parse_currency_value(value_str)
-        
-        return metrics
-    
-    async def fetch_executive_summary(self, report_date: Optional[date] = None) -> dict[str, Any]:
-        """
-        Fetch Executive Summary report for accurate cash flow metrics.
-        
-        This is the primary data source for cash runway calculations.
-        The report includes all cash flow sources (invoices, bills, bank feeds, etc.)
-        and excludes internal transfers automatically.
-        
-        Args:
-            report_date: Date for the report (defaults to today).
-                        Use month-end dates (e.g., 2025-12-31) for historical months.
-                        
-                        Important: Xero always returns the FULL calendar month report,
-                        regardless of the date passed. For example:
-                        - If today is Dec 23, 2025 and report_date=None:
-                          Returns: "For the month of December 2025" (Dec 1-31)
-                          Data: Actual transactions up to Dec 23 only (not projected)
-                        - If report_date=2025-11-30:
-                          Returns: "For the month of November 2025" (Nov 1-30)
-                          Data: Complete November data
-        
-        Returns:
-            {
-                "cash_position": 0.0,      # Closing bank balance
-                "cash_spent": 0.0,         # Actual cash outflow (excludes internal transfers)
-                "cash_received": 0.0,      # Actual cash inflow
-                "operating_expenses": 0.0, # Total expenses from P&L
-                "report_date": "YYYY-MM-DD",
-                "raw_data": {...}          # Full report structure
-            }
+            Serialized balance sheet report data
         """
         try:
-            if report_date is None:
-                report_date = datetime.now(timezone.utc).date()
-            
-            # Get organization_id for rate limiting (from token)
+            # Get organization_id for rate limiting
             organization_id = self.client.token.organization_id if hasattr(self.client, "token") else None
             
             # Rate limit check
@@ -409,9 +318,10 @@ class XeroDataFetcher:
             
             # Execute API call with retry logic
             async def _fetch():
-                return self.api.get_report_executive_summary(
+                return self.api.get_report_balance_sheet(
                     xero_tenant_id=self.tenant_id,
                     date=report_date,
+                    standard_layout=True  # CRITICAL: Ensures consistent JSON structure
                 )
             
             response = await self.retry_handler.execute_with_retry(_fetch)
@@ -420,170 +330,360 @@ class XeroDataFetcher:
             if organization_id:
                 await self.rate_limiter.record_call(organization_id)
             
-            if not hasattr(response, "reports") or not response.reports:
-                logger.warning("No reports found in Executive Summary response")
-                return {
-                    "cash_position": 0.0,
-                    "cash_spent": 0.0,
-                    "cash_received": 0.0,
-                    "operating_expenses": 0.0,
-                    "report_date": report_date.isoformat(),
-                    "raw_data": None,
-                }
+            # Commit token updates (SDK may have refreshed)
+            await self.client.commit_token_updates()
             
+            if not response.reports or len(response.reports) == 0:
+                return {}
+            
+            # Extract first report (Xero returns list of reports)
             report = response.reports[0]
-            rows = report.rows if hasattr(report, "rows") else []
+            report_dict = _to_json_serializable(report)
             
-            # Use semantic matching to find Cash section
-            cash_section = self._find_report_section(
-                rows,
-                possible_titles=["Cash", "Trésorerie", "Efectivo", "Liquid Assets", "Bank Accounts", "Cash and Bank"],
-                row_type="Section"
-            )
-            
-            cash_metrics = self._extract_cash_metrics(cash_section) if cash_section else {
-                "cash_position": Decimal("0.00"),
-                "cash_spent": Decimal("0.00"),
-                "cash_received": Decimal("0.00"),
-            }
-            
-            if not cash_section:
-                logger.warning(
-                    "Cash section not found in Executive Summary report. "
-                    "This may indicate a non-English locale or custom report layout."
-                )
-            
-            # Use semantic matching to find Profitability section
-            profitability_section = self._find_report_section(
-                rows,
-                possible_titles=["Profitability", "Rentabilité", "Rentabilidad", "Profit", "Performance"],
-                row_type="Section"
-            )
-            
-            profitability_metrics = self._extract_profitability_metrics(profitability_section) if profitability_section else {
-                "operating_expenses": Decimal("0.00"),
-            }
-            
-            if not profitability_section:
-                logger.warning(
-                    "Profitability section not found in Executive Summary report. "
-                    "This may indicate a non-English locale or custom report layout."
-                )
-            
-            cash_position = cash_metrics["cash_position"]
-            cash_spent = cash_metrics["cash_spent"]
-            cash_received = cash_metrics["cash_received"]
-            operating_expenses = profitability_metrics["operating_expenses"]
-            
-            raw_data = report.to_dict() if hasattr(report, "to_dict") else None
-            
+            # Format to match expected structure for calculators (keep Xero's original key names)
             return {
-                "cash_position": float(cash_position),
-                "cash_spent": float(cash_spent),
-                "cash_received": float(cash_received),
-                "operating_expenses": float(operating_expenses),
-                "report_date": report_date.isoformat(),
-                "raw_data": _to_json_serializable(raw_data),
+                "raw_data": report_dict,  # Full report structure as Xero provides it
+                "report_id": report_dict.get("ReportID") or report_dict.get("report_id"),
+                "report_name": report_dict.get("ReportName") or report_dict.get("report_name", "Balance Sheet"),
+                "report_date": report_dict.get("ReportDate") or report_dict.get("report_date"),
             }
+        except ApiException as e:
+            logger.error("Xero API Error (Balance Sheet): %s", e)
+            raise XeroDataFetchError(f"Failed to fetch Balance Sheet: {e}", status_code=e.status) from e
+    
+    async def fetch_accounts(self) -> dict[str, str]:
+        """
+        Fetch all accounts and create AccountID to AccountType mapping.
+        
+        This mapping is used to identify account types (REVENUE, EXPENSE, COGS)
+        regardless of user-defined account names.
+        
+        Returns:
+            Dictionary mapping AccountID to AccountType (e.g., {"uuid": "REVENUE", ...})
+        """
+        try:
+            # Get organization_id for rate limiting
+            organization_id = self.client.token.organization_id if hasattr(self.client, "token") else None
+            
+            # Rate limit check
+            if organization_id:
+                await self.rate_limiter.wait_if_needed(organization_id)
+            
+            # Execute API call with retry logic
+            async def _fetch():
+                return self.api.get_accounts(xero_tenant_id=self.tenant_id)
+            
+            response = await self.retry_handler.execute_with_retry(_fetch)
+            
+            # Record API call for rate limiting
+            if organization_id:
+                await self.rate_limiter.record_call(organization_id)
+            
+            # Commit token updates (SDK may have refreshed)
+            await self.client.commit_token_updates()
+            
+            # Build AccountID -> AccountType mapping
+            account_type_map = {}
+            revenue_count = 0
+            expense_count = 0
+            cogs_count = 0
+            
+            if hasattr(response, "accounts") and response.accounts:
+                for account in response.accounts:
+                    account_id = None
+                    account_type = None
+                    
+                    # Extract AccountID (handle both PascalCase and lowercase)
+                    if hasattr(account, "account_id"):
+                        account_id = str(account.account_id)
+                    elif hasattr(account, "AccountID"):
+                        account_id = str(account.AccountID)
+                    
+                    # Extract AccountType (handle both PascalCase and lowercase)
+                    if hasattr(account, "type"):
+                        account_type_obj = account.type
+                        if hasattr(account_type_obj, "value"):
+                            account_type = str(account_type_obj.value)
+                        else:
+                            account_type = str(account_type_obj)
+                    elif hasattr(account, "Type"):
+                        account_type_obj = account.Type
+                        if hasattr(account_type_obj, "value"):
+                            account_type = str(account_type_obj.value)
+                        else:
+                            account_type = str(account_type_obj)
+                    
+                    if account_id and account_type:
+                        account_type_map[account_id] = account_type
+                        # Count by type for logging
+                        if account_type.upper() == "REVENUE":
+                            revenue_count += 1
+                        elif account_type.upper() == "EXPENSE":
+                            expense_count += 1
+                        elif account_type.upper() == "COGS":
+                            cogs_count += 1
+            
+            logger.info(
+                "Fetched %s accounts: %s REVENUE, %s EXPENSE, %s COGS (total mapped: %s)",
+                len(response.accounts) if hasattr(response, "accounts") and response.accounts else 0,
+                revenue_count,
+                expense_count,
+                cogs_count,
+                len(account_type_map)
+            )
+            return account_type_map
             
         except ApiException as e:
-            logger.error("SDK error fetching Executive Summary report: %s", e)
-            raise XeroDataFetchError(
-                f"Failed to fetch Executive Summary: {str(e)}",
-                status_code=e.status if hasattr(e, "status") else None,
-                endpoint="ExecutiveSummary"
-            ) from e
-        except Exception as e:
-            logger.error("Error fetching Executive Summary report: %s", e, exc_info=True)
-            raise XeroDataFetchError(
-                f"Failed to fetch Executive Summary: {str(e)}",
-                endpoint="ExecutiveSummary"
-            ) from e
+            logger.error("Xero API Error (Accounts): %s", e)
+            raise XeroDataFetchError(f"Failed to fetch Accounts: {e}", status_code=e.status) from e
     
-    async def fetch_executive_summary_history(self, months: int = 6) -> list[dict[str, Any]]:
+    async def fetch_trial_balance(self, report_date: date) -> dict[str, Any]:
         """
-        Fetch Executive Summary for multiple historical months.
+        Fetch Trial Balance report for a specific date.
         
-        Useful for trend analysis and historical burn rate calculations.
+        Trial Balance provides a flat list of all account balances with AccountID
+        in cell attributes, allowing deterministic extraction by AccountType.
         
         Args:
-            months: Number of historical months to fetch (default: 6)
-                   Fetches: (current-1), (current-2), ..., (current-months)
-                   Example: If today is Dec 23, 2025 and months=3:
-                            - Nov 2025 (month-end: 2025-11-30)
-                            - Oct 2025 (month-end: 2025-10-31)
-                            - Sep 2025 (month-end: 2025-09-30)
-        
+            report_date: Date for the trial balance snapshot
+            
         Returns:
-            List of Executive Summary data, one per month, ordered from oldest to newest.
-            Each item has the same structure as fetch_executive_summary().
+            Serialized trial balance report data
         """
-        history = []
-        today = datetime.now(timezone.utc).date()
-        current_month_start = today.replace(day=1)
-        
-        for i in range(1, months + 1):
-            target_year = current_month_start.year
-            target_month = current_month_start.month - i
+        try:
+            # Get organization_id for rate limiting
+            organization_id = self.client.token.organization_id if hasattr(self.client, "token") else None
             
-            while target_month <= 0:
-                target_month += 12
-                target_year -= 1
+            # Rate limit check
+            if organization_id:
+                await self.rate_limiter.wait_if_needed(organization_id)
             
-            month_end = self._get_month_end_date(target_year, target_month)
+            # Execute API call with retry logic
+            async def _fetch():
+                return self.api.get_report_trial_balance(
+                    xero_tenant_id=self.tenant_id,
+                    date=report_date
+                )
             
-            try:
-                summary = await self.fetch_executive_summary(report_date=month_end)
-                history.append(summary)
-            except XeroDataFetchError as e:
-                logger.warning("Failed to fetch Executive Summary for %s: %s", month_end, e.message)
-                history.append({
-                    "cash_position": 0.0,
-                    "cash_spent": 0.0,
-                    "cash_received": 0.0,
-                    "operating_expenses": 0.0,
-                    "report_date": month_end.isoformat(),
-                    "raw_data": None,
-                    "error": e.message,
-                })
-        
-        return list(reversed(history))
-    
-    async def fetch_receivables(self) -> dict[str, Any]:
-        """
-        Fetch Accounts Receivable invoices.
-        
-        Used for leading indicators (receivables timing, overdue analysis).
-        
-        Returns:
-            {
-                "total": 0.0,
-                "count": 0,
-                "overdue_amount": 0.0,
-                "overdue_count": 0,
-                "avg_days_overdue": 0.0,
-                "invoices": [...]
+            response = await self.retry_handler.execute_with_retry(_fetch)
+            
+            # Record API call for rate limiting
+            if organization_id:
+                await self.rate_limiter.record_call(organization_id)
+            
+            # Commit token updates (SDK may have refreshed)
+            await self.client.commit_token_updates()
+            
+            if not response.reports or len(response.reports) == 0:
+                return {}
+            
+            # Extract first report (Xero returns list of reports)
+            report = response.reports[0]
+            report_dict = _to_json_serializable(report)
+            
+            # Format to match expected structure
+            return {
+                "raw_data": report_dict,
+                "report_id": report_dict.get("ReportID") or report_dict.get("report_id"),
+                "report_name": report_dict.get("ReportName") or report_dict.get("report_name", "Trial Balance"),
+                "report_date": report_dict.get("ReportDate") or report_dict.get("report_date"),
             }
-        """
-        return await self._fetch_invoices(invoice_type="ACCREC")
+        except ApiException as e:
+            logger.error("Xero API Error (Trial Balance): %s", e)
+            raise XeroDataFetchError(f"Failed to fetch Trial Balance: {e}", status_code=e.status) from e
     
-    async def fetch_payables(self) -> dict[str, Any]:
+    def extract_pnl_from_trial_balance(
+        self,
+        trial_balance: dict[str, Any],
+        account_type_map: dict[str, str]
+    ) -> dict[str, Optional[float]]:
         """
-        Fetch Accounts Payable invoices (bills).
+        Extract P&L values from Trial Balance using AccountType mapping.
         
-        Used for leading indicators (payables timing, cash pressure signals).
+        This method is deterministic - it uses fixed AccountType (REVENUE, EXPENSE, COGS)
+        rather than user-defined labels, making it reliable across all organizations.
         
+        Args:
+            trial_balance: Trial Balance report data from fetch_trial_balance()
+            account_type_map: AccountID -> AccountType mapping from fetch_accounts()
+            
         Returns:
-            {
-                "total": 0.0,
-                "count": 0,
-                "overdue_amount": 0.0,
-                "overdue_count": 0,
-                "avg_days_overdue": 0.0,
-                "invoices": [...]
-            }
+            Dictionary with extracted values: revenue, cost_of_sales, expenses
+            Note: Gross Profit and Net Profit are calculated, not extracted
         """
-        return await self._fetch_invoices(invoice_type="ACCPAY")
+        if not trial_balance or not trial_balance.get("raw_data"):
+            return {
+                "revenue": None,
+                "cost_of_sales": None,
+                "expenses": None,
+            }
+        
+        raw_data = trial_balance.get("raw_data", {})
+        if not isinstance(raw_data, dict):
+            return {
+                "revenue": None,
+                "cost_of_sales": None,
+                "expenses": None,
+            }
+        
+        # Extract rows from trial balance
+        rows = raw_data.get("Rows", raw_data.get("rows", []))
+        if not isinstance(rows, list):
+            rows = []
+        
+        # Initialize totals (using list to allow modification in nested function)
+        totals = {
+            "revenue": Decimal("0.00"),
+            "cost_of_sales": Decimal("0.00"),
+            "expenses": Decimal("0.00"),
+        }
+        
+        def _process_rows(rows_list: list):
+            """Recursively process rows to extract account balances."""
+            if not isinstance(rows_list, list):
+                return
+            
+            for row in rows_list:
+                if not isinstance(row, dict):
+                    continue
+                
+                row_type = row.get("RowType", row.get("row_type", ""))
+                
+                # Only process Row types (not Header, Section, SummaryRow)
+                if row_type != "Row":
+                    # Recursively process nested rows
+                    nested_rows = row.get("Rows", row.get("rows", []))
+                    if nested_rows:
+                        _process_rows(nested_rows)
+                    continue
+                
+                # Extract cells
+                cells = row.get("Cells", row.get("cells", []))
+                if not isinstance(cells, list) or len(cells) < 2:
+                    continue
+                
+                # First cell contains account info with AccountID in attributes
+                first_cell = cells[0]
+                if not isinstance(first_cell, dict):
+                    continue
+                
+                # Extract AccountID from attributes
+                attributes = first_cell.get("Attributes", first_cell.get("attributes", []))
+                account_id = None
+                
+                if isinstance(attributes, list):
+                    for attr in attributes:
+                        if isinstance(attr, dict):
+                            attr_id = attr.get("id", attr.get("Id", ""))
+                            if attr_id == "account":
+                                account_id = attr.get("value", attr.get("Value", ""))
+                                break
+                
+                if not account_id:
+                    continue
+                
+                # Look up AccountType
+                account_type = account_type_map.get(account_id)
+                if not account_type:
+                    continue
+                
+                # Extract value from second cell (balance)
+                value_cell = cells[1]
+                if not isinstance(value_cell, dict):
+                    continue
+                
+                value_str = value_cell.get("Value", value_cell.get("value", "0"))
+                value = self._parse_currency_value(value_str, "0.00")
+                
+                # Sum by AccountType (case-insensitive matching)
+                account_type_upper = account_type.upper()
+                if account_type_upper == "REVENUE":
+                    totals["revenue"] += value
+                    logger.debug("Found REVENUE account %s: %s", account_id, float(value))
+                elif account_type_upper == "COGS":
+                    totals["cost_of_sales"] += value
+                    logger.debug("Found COGS account %s: %s", account_id, float(value))
+                elif account_type_upper == "EXPENSE":
+                    totals["expenses"] += value
+                    logger.debug("Found EXPENSE account %s: %s", account_id, float(value))
+        
+        _process_rows(rows)
+        
+        total_revenue = totals["revenue"]
+        total_cost_of_sales = totals["cost_of_sales"]
+        total_expenses = totals["expenses"]
+        
+        logger.info(
+            "Extracted from Trial Balance: Revenue=%s, Cost of Sales=%s, Expenses=%s (from %s accounts mapped)",
+            float(total_revenue),
+            float(total_cost_of_sales),
+            float(total_expenses),
+            len(account_type_map)
+        )
+        
+        # Return values (0.0 is valid, only return None if we couldn't process)
+        # If we processed rows but got 0, that's a valid result
+        return {
+            "revenue": float(total_revenue),
+            "cost_of_sales": float(total_cost_of_sales),
+            "expenses": float(total_expenses),
+        }
+    
+    async def fetch_profit_loss(self, start_date: date, end_date: date) -> dict[str, Any]:
+        """
+        Fetch Profit & Loss (Performance Source of Truth).
+        Uses standardLayout=true for deterministic parsing.
+        
+        Args:
+            start_date: Start date for P&L period
+            end_date: End date for P&L period
+            
+        Returns:
+            Serialized P&L report data
+        """
+        try:
+            # Get organization_id for rate limiting
+            organization_id = self.client.token.organization_id if hasattr(self.client, "token") else None
+            
+            # Rate limit check
+            if organization_id:
+                await self.rate_limiter.wait_if_needed(organization_id)
+            
+            # Execute API call with retry logic
+            async def _fetch():
+                return self.api.get_report_profit_and_loss(
+                    xero_tenant_id=self.tenant_id,
+                    from_date=start_date,
+                    to_date=end_date,
+                    standard_layout=True  # CRITICAL: Ensures consistent JSON structure
+                )
+            
+            response = await self.retry_handler.execute_with_retry(_fetch)
+            
+            # Record API call for rate limiting
+            if organization_id:
+                await self.rate_limiter.record_call(organization_id)
+            
+            # Commit token updates (SDK may have refreshed)
+            await self.client.commit_token_updates()
+            
+            if not response.reports or len(response.reports) == 0:
+                return {}
+            
+            # Extract first report (Xero returns list of reports)
+            report = response.reports[0]
+            report_dict = _to_json_serializable(report)
+            
+            # Format to match expected structure for calculators (keep Xero's original key names)
+            return {
+                "raw_data": report_dict,  # Full report structure as Xero provides it
+                "report_id": report_dict.get("ReportID") or report_dict.get("report_id"),
+                "report_name": report_dict.get("ReportName") or report_dict.get("report_name", "Profit and Loss"),
+                "report_date": report_dict.get("ReportDate") or report_dict.get("report_date"),
+            }
+        except ApiException as e:
+            logger.error("Xero API Error (P&L): %s", e)
+            raise XeroDataFetchError(f"Failed to fetch P&L: {e}", status_code=e.status) from e
     
     async def _fetch_invoices(self, invoice_type: str) -> dict[str, Any]:
         """
@@ -632,6 +732,9 @@ class XeroDataFetcher:
                 # Record API call for rate limiting
                 if organization_id:
                     await self.rate_limiter.record_call(organization_id)
+                
+                # Commit token updates after each API call
+                await self.client.commit_token_updates()
                 
                 # Determine page size from response
                 page_invoices = response.invoices if hasattr(response, "invoices") else []
@@ -786,279 +889,194 @@ class XeroDataFetcher:
                 "multi_currency_detected": multi_currency_detected,
                 "currencies_found": list(currencies_found) if currencies_found else None,
             }
-            
         except ApiException as e:
-            logger.error("SDK error fetching invoices (%s): %s", invoice_type, e)
-            raise XeroDataFetchError(
-                f"Failed to fetch {invoice_type} invoices: {str(e)}",
-                status_code=e.status if hasattr(e, "status") else None,
-                endpoint="Invoices"
-            ) from e
-        except Exception as e:
-            logger.error("Error fetching invoices (%s): %s", invoice_type, e, exc_info=True)
-            raise XeroDataFetchError(
-                f"Failed to fetch {invoice_type} invoices: {str(e)}",
-                endpoint="Invoices"
-            ) from e
+            logger.error("Xero API Error (Invoices %s): %s", invoice_type, e)
+            raise XeroDataFetchError(f"Failed to fetch {invoice_type} invoices: {e}", status_code=e.status) from e
     
-    async def fetch_profit_loss(self, months: int = 3) -> dict[str, Any]:
+    async def fetch_receivables(self) -> dict[str, Any]:
         """
-        Fetch Profit & Loss report.
+        Fetch Accounts Receivable invoices.
         
-        Used for AI narrative (expense categories, revenue trends, profit analysis).
-        Returns raw P&L data for AI analysis.
-        
-        Args:
-            months: Number of months of history
+        Used for leading indicators (receivables timing, overdue analysis).
         
         Returns:
-            P&L report structure (raw from Xero)
+            Invoice summary with metrics
         """
-        try:
-            end_date = datetime.now(timezone.utc).date()
-            start_date = (end_date - timedelta(days=months * 31)).replace(day=1)
-            
-            # Get organization_id for rate limiting
-            organization_id = self.client.token.organization_id if hasattr(self.client, "token") else None
-            
-            # Rate limit check
-            if organization_id:
-                await self.rate_limiter.wait_if_needed(organization_id)
-            
-            # Execute API call with retry logic
-            async def _fetch():
-                return self.api.get_report_profit_and_loss(
-                    xero_tenant_id=self.tenant_id,
-                    from_date=start_date,
-                    to_date=end_date,
-                )
-            
-            response = await self.retry_handler.execute_with_retry(_fetch)
-            
-            # Record API call for rate limiting
-            if organization_id:
-                await self.rate_limiter.record_call(organization_id)
-            
-            if hasattr(response, "reports") and response.reports:
-                report = response.reports[0]
-                raw_data = report.to_dict() if hasattr(report, "to_dict") else None
-                return {
-                    "report_id": report.report_id if hasattr(report, "report_id") else None,
-                    "report_name": report.report_name if hasattr(report, "report_name") else None,
-                    "report_date": report.report_date if hasattr(report, "report_date") else None,
-                    "raw_data": _to_json_serializable(raw_data),
-                }
-            
-            return {
-                "report_id": None,
-                "report_name": "Profit and Loss",
-                "report_date": None,
-                "raw_data": None,
-            }
-            
-        except ApiException as e:
-            logger.warning("SDK error fetching Profit & Loss report: %s", e)
-            return {
-                "report_id": None,
-                "report_name": "Profit and Loss",
-                "report_date": None,
-                "raw_data": None,
-                "error": str(e),
-            }
-        except Exception as e:
-            logger.warning("Error fetching Profit & Loss report: %s", e)
-            return {
-                "report_id": None,
-                "report_name": "Profit and Loss",
-                "report_date": None,
-                "raw_data": None,
-                "error": str(e),
-            }
+        return await self._fetch_invoices(invoice_type="ACCREC")
+    
+    async def fetch_payables(self) -> dict[str, Any]:
+        """
+        Fetch Accounts Payable invoices (bills).
+        
+        Used for leading indicators (payables timing, cash pressure signals).
+        
+        Returns:
+            Invoice summary with metrics
+        """
+        return await self._fetch_invoices(invoice_type="ACCPAY")
     
     async def fetch_all_data(
         self, 
         organization_id: Optional[UUID] = None,
-        months: int = 6,
+        months: int = 6, 
         force_refresh: bool = False
     ) -> dict[str, Any]:
         """
-        Fetch all financial data required for cash runway calculations.
+        Orchestrates fetching of all required financial data.
         
-        Primary data source: Executive Summary Report (current + historical).
-        Additional data: Receivables, Payables, P&L for context and AI narrative.
-        
-        Uses cache when available and not force_refresh.
+        Strategy:
+        1. Fetch Balance Sheet for Today (Current Cash)
+        2. Fetch Balance Sheet for T-30 Days (For Burn Rate Delta)
+        3. Fetch P&L for specified months period (Profitability)
+        4. Fetch Receivables/Payables (Leading Indicators)
         
         Args:
-            organization_id: Organization UUID (required for caching)
-            months: Number of historical months to fetch (default: 6)
-            force_refresh: If True, bypass cache and fetch fresh data
+            organization_id: Organization UUID (required for caching, reserved for future use)
+            months: Number of historical months to fetch for P&L (1-12, default: 6)
+            force_refresh: If True, bypass cache and fetch fresh data (reserved for future use)
         
         Returns:
             Complete financial data structure
         """
         try:
             errors = []
+            today = datetime.now(timezone.utc).date()
             
-            # Try cache first (if cache_service and organization_id provided, and not force_refresh)
-            use_cache = (
-                self.cache_service is not None
-                and organization_id is not None
-                and not force_refresh
-            )
+            # Note: organization_id and force_refresh are reserved for future caching implementation
+            _ = organization_id, force_refresh
             
-            executive_summary_current = None
-            executive_summary_history_cached = {}
-            executive_summary_history_missing = []
+            # Use simple 30 day lookback for "Previous Month" comparison
+            prior_date = today - timedelta(days=30)
+            
+            # 1. Fetch Balance Sheets (Current & Prior for Delta Calc)
+            balance_sheet_current = None
+            balance_sheet_prior = None
+            
+            try:
+                balance_sheet_current = await self.fetch_balance_sheet(today)
+            except XeroDataFetchError as e:
+                errors.append(f"Balance Sheet (current): {e.message}")
+                balance_sheet_current = {}
+            
+            try:
+                balance_sheet_prior = await self.fetch_balance_sheet(prior_date)
+            except XeroDataFetchError as e:
+                errors.append(f"Balance Sheet (prior): {e.message}")
+                balance_sheet_prior = {}
+            
+            # 2. Fetch P&L for specified months period
+            profit_loss = None
+            try:
+                # Calculate date range: months months back from today
+                # Example: If months=3 and today is Jan 6, 2026, fetch from Oct 6, 2025 to Jan 6, 2026
+                start_date = self._calculate_months_ago(today, months)
+                
+                profit_loss = await self.fetch_profit_loss(
+                    start_date=start_date,
+                    end_date=today
+                )
+                logger.info(
+                    "Fetched P&L for period: %s to %s (%s months)",
+                    start_date,
+                    today,
+                    months
+                )
+            except XeroDataFetchError as e:
+                errors.append(f"Profit & Loss: {e.message}")
+                profit_loss = {}
+            
+            # 3. Fetch Accounts (for AccountType mapping) and Trial Balance (deterministic P&L via AccountType)
+            accounts_map = {}
+            trial_balance = {}
+            trial_balance_pnl = {}
+            try:
+                accounts_map = await self.fetch_accounts()
+                logger.info("Fetched %s accounts for AccountType mapping", len(accounts_map))
+            except XeroDataFetchError as e:
+                errors.append(f"Accounts: {e.message}")
+                logger.warning("Failed to fetch accounts: %s", e.message)
+                accounts_map = {}
+            
+            try:
+                # Calculate P&L period start date
+                start_date = self._calculate_months_ago(today, months)
+                
+                # Fetch Trial Balance for end date (period end)
+                # Note: Trial Balance is a snapshot, so we get balances at end_date
+                # For period-based P&L, we'd ideally need start and end, but for MVP
+                # we'll use end_date snapshot which shows cumulative balances
+                trial_balance = await self.fetch_trial_balance(today)
+                logger.info("Fetched Trial Balance for date: %s", today)
+                
+                if accounts_map:
+                    trial_balance_pnl = self.extract_pnl_from_trial_balance(trial_balance, accounts_map)
+                    logger.info(
+                        "Trial Balance P&L extraction result: revenue=%s, cost_of_sales=%s, expenses=%s",
+                        trial_balance_pnl.get("revenue"),
+                        trial_balance_pnl.get("cost_of_sales"),
+                        trial_balance_pnl.get("expenses")
+                    )
+                else:
+                    logger.warning("Cannot extract Trial Balance P&L: account_type_map is empty")
+                    trial_balance_pnl = {}
+            except XeroDataFetchError as e:
+                errors.append(f"Trial Balance: {e.message}")
+                logger.warning("Failed to fetch Trial Balance: %s", e.message)
+                trial_balance = {}
+                trial_balance_pnl = {}
+            
+            # 3. Fetch Invoices (Receivables/Payables)
             receivables = None
             payables = None
-            profit_loss = None
             
-            if use_cache:
-                # Get cached Executive Summary
-                (
-                    executive_summary_current,
-                    executive_summary_history_cached,
-                    executive_summary_history_missing,
-                ) = await self.cache_service.get_cached_executive_summary(
-                    organization_id, months
-                )
-                
-                # Get cached financial data
-                cached_financial = await self.cache_service.get_cached_financial_data(
-                    organization_id
-                )
-                if cached_financial:
-                    receivables = cached_financial.get("invoices_receivable")
-                    payables = cached_financial.get("invoices_payable")
-                    profit_loss = cached_financial.get("profit_loss")
+            try:
+                receivables = await self.fetch_receivables()
+            except XeroDataFetchError as e:
+                errors.append(f"Receivables: {e.message}")
+                receivables = {
+                    "total": 0.0,
+                    "count": 0,
+                    "overdue_amount": 0.0,
+                    "overdue_count": 0,
+                    "avg_days_overdue": 0.0,
+                    "invoices": [],
+                }
             
-            # Fetch current Executive Summary if not cached
-            if executive_summary_current is None:
-                try:
-                    executive_summary_current = await self.fetch_executive_summary()
-                    # Commit token updates immediately after API call (SDK may have refreshed)
-                    await self.client.commit_token_updates()
-                except XeroDataFetchError as e:
-                    errors.append(f"Executive Summary (current): {e.message}")
-                    executive_summary_current = {
-                        "cash_position": 0.0,
-                        "cash_spent": 0.0,
-                        "cash_received": 0.0,
-                        "operating_expenses": 0.0,
-                        "report_date": datetime.now(timezone.utc).date().isoformat(),
-                        "raw_data": None,
-                    }
-            
-            # Fetch missing historical months
-            executive_summary_history_fetched = []
-            if executive_summary_history_missing:
-                try:
-                    # Fetch only missing months
-                    for missing_date in executive_summary_history_missing:
-                        month_data = await self.fetch_executive_summary(report_date=missing_date)
-                        executive_summary_history_fetched.append(month_data)
-                        # Commit token updates after each API call
-                        await self.client.commit_token_updates()
-                except Exception as e:
-                    errors.append(f"Executive Summary (history): {str(e)}")
-            
-            # Combine cached and fetched historical data
-            executive_summary_history = list(executive_summary_history_cached.values())
-            executive_summary_history.extend(executive_summary_history_fetched)
-            # Sort by report_date (oldest first)
-            executive_summary_history.sort(key=lambda x: x.get("report_date", ""))
-            
-            # Fetch receivables if not cached
-            if receivables is None:
-                try:
-                    receivables = await self.fetch_receivables()
-                    # Commit token updates immediately after API call
-                    await self.client.commit_token_updates()
-                except XeroDataFetchError as e:
-                    errors.append(f"Receivables: {e.message}")
-                    receivables = {
-                        "total": 0.0,
-                        "count": 0,
-                        "overdue_amount": 0.0,
-                        "overdue_count": 0,
-                        "avg_days_overdue": 0.0,
-                        "invoices": [],
-                    }
-            
-            # Fetch payables if not cached
-            if payables is None:
-                try:
-                    payables = await self.fetch_payables()
-                    # Commit token updates immediately after API call
-                    await self.client.commit_token_updates()
-                except XeroDataFetchError as e:
-                    errors.append(f"Payables: {e.message}")
-                    payables = {
-                        "total": 0.0,
-                        "count": 0,
-                        "overdue_amount": 0.0,
-                        "overdue_count": 0,
-                        "avg_days_overdue": 0.0,
-                        "invoices": [],
-                    }
-            
-            # Fetch P&L if not cached
-            if profit_loss is None:
-                try:
-                    profit_loss = await self.fetch_profit_loss(months=3)
-                    # Commit token updates immediately after API call
-                    await self.client.commit_token_updates()
-                except Exception as e:
-                    # P&L is optional, log but don't fail
-                    logger.warning("Failed to fetch P&L: %s", e)
-                    profit_loss = {
-                        "report_id": None,
-                        "report_name": "Profit and Loss",
-                        "report_date": None,
-                        "raw_data": None,
-                        "error": str(e),
-                    }
-            
-            # Save to cache if we fetched new data
-            if use_cache and organization_id:
-                try:
-                    # Save Executive Summary
-                    if executive_summary_current or executive_summary_history_fetched:
-                        await self.cache_service.save_executive_summary_cache(
-                            organization_id=organization_id,
-                            current=executive_summary_current,
-                            historical=executive_summary_history_fetched,
-                        )
-                    
-                    # Save financial data (if we fetched any)
-                    if receivables or payables or profit_loss:
-                        await self.cache_service.save_financial_data_cache(
-                            organization_id=organization_id,
-                            receivables=receivables,
-                            payables=payables,
-                            profit_loss=profit_loss,
-                        )
-                except Exception as e:
-                    logger.warning("Failed to save to cache: %s", e)
-                    # Don't fail the request if cache save fails
-            
-            if errors:
-                logger.warning("Some data fetch operations failed: %s", ", ".join(errors))
+            try:
+                payables = await self.fetch_payables()
+            except XeroDataFetchError as e:
+                errors.append(f"Payables: {e.message}")
+                payables = {
+                    "total": 0.0,
+                    "count": 0,
+                    "overdue_amount": 0.0,
+                    "overdue_count": 0,
+                    "avg_days_overdue": 0.0,
+                    "invoices": [],
+                }
             
             # Final commit to ensure all token updates are saved
             await self.client.commit_token_updates()
             
+            if errors:
+                logger.warning("Some data fetch operations failed: %s", ", ".join(errors))
+            
+            # 4. Compile Data Package
             return {
-                "executive_summary_current": executive_summary_current,
-                "executive_summary_history": executive_summary_history,
+                "balance_sheet_current": balance_sheet_current,
+                "balance_sheet_prior": balance_sheet_prior,
+                "profit_loss": profit_loss,
+                "trial_balance": trial_balance,
+                "account_type_map": accounts_map,
+                "trial_balance_pnl": trial_balance_pnl,
                 "invoices_receivable": receivables,
                 "invoices_payable": payables,
-                "profit_loss": profit_loss,
                 "fetched_at": datetime.now(timezone.utc).isoformat(),
                 "errors": errors if errors else None,
             }
-            
+        except XeroDataFetchError:
+            # Re-raise our own errors as-is
+            raise
         except Exception as e:
-            logger.error("Error fetching all data: %s", e, exc_info=True)
-            raise XeroDataFetchError(f"Failed to fetch financial data: {str(e)}") from e
+            logger.error("Failed to fetch all data: %s", e)
+            raise XeroDataFetchError(f"Failed to fetch all data: {str(e)}") from e

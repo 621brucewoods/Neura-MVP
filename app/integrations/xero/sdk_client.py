@@ -96,7 +96,12 @@ class XeroSDKClient:
         self.token.last_error = None
         
         if "scope" in new_token:
-            self.token.scope = new_token["scope"]
+            # Convert scope to space-separated string if it's a list
+            scope_value = new_token["scope"]
+            if isinstance(scope_value, list):
+                self.token.scope = " ".join(scope_value)
+            else:
+                self.token.scope = str(scope_value) if scope_value else ""
         
         if "expires_at" in new_token:
             self.token.expires_at = datetime.fromtimestamp(
@@ -155,6 +160,9 @@ class XeroSDKClient:
         
         Uses a per-organization lock to prevent multiple concurrent processes
         from refreshing the token simultaneously, which would cause invalid_grant errors.
+        
+        CRITICAL: Must commit in-memory changes BEFORE refreshing from database,
+        otherwise db.refresh() will overwrite the updated token values.
         """
         # Get organization_id from token
         organization_id = self.token.organization_id
@@ -163,26 +171,34 @@ class XeroSDKClient:
         lock = await TokenRefreshLock.get_lock(organization_id)
         
         async with lock:
-            # Refresh token from database to get latest state
+            # Save the refresh_token we have in memory (from _save_token callback)
+            # This is the NEW token that SDK just refreshed
+            in_memory_refresh_token = self.token.refresh_token
+            
+            # Commit our in-memory token updates to database
+            # self.token has the updated values from _save_token() callback
+            await self.xero_service.db.commit()
+            
+            # Now refresh from database to get the committed state
             await self.xero_service.db.refresh(self.token)
             
-            # Check if token was just refreshed by another process (within last 5 seconds)
+            # Check if another process refreshed the token (within last 5 seconds)
             if self.token.last_refreshed_at:
                 time_since_refresh = datetime.now(timezone.utc) - self.token.last_refreshed_at
                 if time_since_refresh < timedelta(seconds=5):
-                    # Token was recently refreshed, check if our in-memory token is stale
-                    if self.token.refresh_token != self._token_dict.get("refresh_token"):
-                        # Another process refreshed, update our in-memory dict
+                    # Token was recently refreshed, check if it was by another process
+                    if self.token.refresh_token != in_memory_refresh_token:
+                        # Another process refreshed while we were committing
+                        # Update our in-memory dict to match the database
                         logger.info(
-                            "Token was refreshed by another process, updating in-memory token for org %s",
+                            "Token was refreshed by another process during commit, updating in-memory token for org %s",
                             organization_id
                         )
                         self._token_dict = self._build_token_dict()
-                        return  # No need to commit, token already saved
+                        return
             
-            # Commit our token updates
-            await self.xero_service.db.commit()
-            await self.xero_service.db.refresh(self.token)
+            # Update _token_dict to match the committed database state
+            self._token_dict = self._build_token_dict()
             
             logger.debug("Committed token updates for organization %s", organization_id)
 
