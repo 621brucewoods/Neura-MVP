@@ -4,7 +4,7 @@ API endpoints for financial insights and calculations.
 """
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -36,8 +36,8 @@ router = APIRouter(prefix="/api/insights", tags=["Insights"])
 )
 async def get_insights(
     current_user: User = Depends(get_current_user),
-    start_date: date = Query(..., description="Start date for P&L period (YYYY-MM-DD)"),
-    end_date: date = Query(..., description="End date for P&L period (YYYY-MM-DD)"),
+    start_date: Optional[date] = Query(None, description="Start date for P&L period (YYYY-MM-DD). Defaults to 30 days ago."),
+    end_date: Optional[date] = Query(None, description="End date for P&L period (YYYY-MM-DD). Defaults to today."),
     force_refresh: bool = Query(default=False, description="Force refresh, bypass cache"),
     db: AsyncSession = Depends(get_async_session),
 ) -> InsightsResponse:
@@ -59,6 +59,13 @@ async def get_insights(
             detail="User has no organization",
         )
     
+    # Set default dates if not provided
+    today = datetime.now(timezone.utc).date()
+    if end_date is None:
+        end_date = today
+    if start_date is None:
+        start_date = today - timedelta(days=30)
+    
     # Validate date range
     if start_date >= end_date:
         raise HTTPException(
@@ -66,7 +73,7 @@ async def get_insights(
             detail="start_date must be before end_date",
         )
     
-    today = datetime.now(timezone.utc).date()
+    # Validate end_date is not in future
     if end_date > today:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -208,6 +215,95 @@ async def get_insights(
 
 
 @router.get(
+    "/list",
+    response_model=dict[str, Any],
+    summary="List all insights",
+    description="Get all stored insights with pagination and filtering.",
+)
+async def list_insights(
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    limit: int = Query(20, ge=1, le=100, description="Items per page"),
+    insight_type: Optional[str] = Query(None, description="Filter by insight type"),
+    severity: Optional[str] = Query(None, description="Filter by severity (high, medium, low)"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
+    """
+    List all stored insights with pagination.
+    
+    Simple endpoint that queries the database only.
+    No calculations, no date filters - just returns stored insights.
+    """
+    if not current_user.organization:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User has no organization",
+        )
+    
+    try:
+        # Build query
+        stmt = select(InsightModel).where(
+            InsightModel.organization_id == current_user.organization.id
+        )
+        
+        # Apply filters
+        if insight_type:
+            stmt = stmt.where(InsightModel.insight_type == insight_type)
+        if severity:
+            stmt = stmt.where(InsightModel.severity == severity)
+        
+        # Get total count
+        count_stmt = select(func.count()).select_from(stmt.subquery())
+        total_result = await db.execute(count_stmt)
+        total = total_result.scalar() or 0
+        
+        # Apply pagination and ordering
+        offset = (page - 1) * limit
+        stmt = stmt.order_by(desc(InsightModel.generated_at))
+        stmt = stmt.limit(limit).offset(offset)
+        
+        # Execute query
+        result = await db.execute(stmt)
+        insights = result.scalars().all()
+        
+        # Convert to response format
+        insights_list = []
+        for insight in insights:
+            insights_list.append({
+                "insight_id": insight.insight_id,
+                "insight_type": insight.insight_type,
+                "title": insight.title,
+                "severity": insight.severity,
+                "confidence_level": insight.confidence_level,
+                "summary": insight.summary,
+                "why_it_matters": insight.why_it_matters,
+                "recommended_actions": insight.recommended_actions,
+                "supporting_numbers": insight.supporting_numbers or [],
+                "data_notes": insight.data_notes,
+                "generated_at": insight.generated_at.isoformat(),
+                "is_acknowledged": insight.is_acknowledged,
+                "is_marked_done": insight.is_marked_done,
+            })
+        
+        total_pages = (total + limit - 1) // limit if total > 0 else 0
+        
+        return {
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "total_pages": total_pages,
+            "insights": insights_list,
+        }
+        
+    except Exception as e:
+        logger.error("Error listing insights: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list insights: {str(e)}",
+        )
+
+
+@router.get(
     "/{insight_id}",
     response_model=Insight,
     summary="Get insight details",
@@ -216,8 +312,8 @@ async def get_insights(
 async def get_insight_detail(
     insight_id: str,
     current_user: User = Depends(get_current_user),
-    start_date: date = Query(..., description="Start date for P&L period (YYYY-MM-DD)"),
-    end_date: date = Query(..., description="End date for P&L period (YYYY-MM-DD)"),
+    start_date: Optional[date] = Query(None, description="Start date for P&L period (YYYY-MM-DD). Defaults to 30 days ago."),
+    end_date: Optional[date] = Query(None, description="End date for P&L period (YYYY-MM-DD). Defaults to today."),
     db: AsyncSession = Depends(get_async_session),
 ) -> Insight:
     """
@@ -230,6 +326,26 @@ async def get_insight_detail(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User has no organization",
+        )
+    
+    # Set default dates if not provided
+    today = datetime.now(timezone.utc).date()
+    if end_date is None:
+        end_date = today
+    if start_date is None:
+        start_date = today - timedelta(days=30)
+    
+    # Validate date range
+    if start_date >= end_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="start_date must be before end_date",
+        )
+    
+    if end_date > today:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="end_date cannot be in the future",
         )
     
     try:
@@ -429,97 +545,4 @@ async def mark_insight_done(
         )
 
 
-@router.get(
-    "/list",
-    response_model=dict[str, Any],
-    summary="List all insights",
-    description="Get all stored insights with pagination and filtering.",
-)
-async def list_insights(
-    page: int = Query(1, ge=1, description="Page number (1-based)"),
-    limit: int = Query(20, ge=1, le=100, description="Items per page"),
-    insight_type: Optional[str] = Query(None, description="Filter by insight type"),
-    severity: Optional[str] = Query(None, description="Filter by severity (high, medium, low)"),
-    start_date: Optional[date] = Query(None, description="Filter by start date (generated_at)"),
-    end_date: Optional[date] = Query(None, description="Filter by end date (generated_at)"),
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_async_session),
-) -> dict[str, Any]:
-    """
-    List all stored insights with pagination.
-    
-    Returns insights stored in the database for the user's organization.
-    Supports filtering by type, severity, and date range.
-    """
-    if not current_user.organization:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User has no organization",
-        )
-    
-    try:
-        # Build query
-        stmt = select(InsightModel).where(
-            InsightModel.organization_id == current_user.organization.id
-        )
-        
-        # Apply filters
-        if insight_type:
-            stmt = stmt.where(InsightModel.insight_type == insight_type)
-        if severity:
-            stmt = stmt.where(InsightModel.severity == severity)
-        if start_date:
-            stmt = stmt.where(InsightModel.generated_at >= datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc))
-        if end_date:
-            stmt = stmt.where(InsightModel.generated_at <= datetime.combine(end_date, datetime.max.time()).replace(tzinfo=timezone.utc))
-        
-        # Get total count
-        count_stmt = select(func.count()).select_from(stmt.subquery())
-        total_result = await db.execute(count_stmt)
-        total = total_result.scalar() or 0
-        
-        # Apply pagination and ordering
-        offset = (page - 1) * limit
-        stmt = stmt.order_by(desc(InsightModel.generated_at))
-        stmt = stmt.limit(limit).offset(offset)
-        
-        # Execute query
-        result = await db.execute(stmt)
-        insights = result.scalars().all()
-        
-        # Convert to response format
-        insights_list = []
-        for insight in insights:
-            insights_list.append({
-                "insight_id": insight.insight_id,
-                "insight_type": insight.insight_type,
-                "title": insight.title,
-                "severity": insight.severity,
-                "confidence_level": insight.confidence_level,
-                "summary": insight.summary,
-                "why_it_matters": insight.why_it_matters,
-                "recommended_actions": insight.recommended_actions,
-                "supporting_numbers": insight.supporting_numbers or [],
-                "data_notes": insight.data_notes,
-                "generated_at": insight.generated_at.isoformat(),
-                "is_acknowledged": insight.is_acknowledged,
-                "is_marked_done": insight.is_marked_done,
-            })
-        
-        total_pages = (total + limit - 1) // limit if total > 0 else 0
-        
-        return {
-            "total": total,
-            "page": page,
-            "limit": limit,
-            "total_pages": total_pages,
-            "insights": insights_list,
-        }
-        
-    except Exception as e:
-        logger.error("Error listing insights: %s", e, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list insights: {str(e)}",
-        )
 
