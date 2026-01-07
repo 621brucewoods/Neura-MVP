@@ -7,7 +7,9 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
+from app.models.organization import Organization, SyncStatus, SyncStep
+from app.insights.sync_service import SyncService
 
 from app.auth.dependencies import get_current_user
 from app.database.connection import get_async_session
@@ -303,6 +305,37 @@ async def list_insights(
 
 
 @router.get(
+    "/status",
+    summary="Get sync status",
+    description="Polls the current status of the insight generation process.",
+)
+async def get_sync_status(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get the current sync status for the user's organization.
+    """
+    if not current_user.organization:
+        raise HTTPException(status_code=400, detail="User has no organization")
+    
+    # Reload organization to get latest status
+    stmt = select(Organization).where(Organization.id == current_user.organization.id)
+    result = await db.execute(stmt)
+    org = result.scalar_one_or_none()
+    
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+        
+    return {
+        "sync_status": org.sync_status,
+        "sync_step": org.sync_step,
+        "last_sync_error": org.last_sync_error,
+        "updated_at": org.updated_at.isoformat() if org.updated_at else None
+    }
+
+
+@router.get(
     "/{insight_id}",
     response_model=Insight,
     summary="Get insight details",
@@ -536,6 +569,80 @@ async def mark_insight_done(
         await db.rollback()
         # Global exception handler will sanitize this
         raise
+
+
+
+
+@router.post(
+    "/trigger",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Trigger async insights generation",
+    description="Starts the background process to fetch data, calculate metrics, and generate AI insights.",
+)
+async def trigger_insights_generation(
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
+    force_refresh: bool = Query(default=False, description="Force refresh, bypass cache"),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Trigger the insights generation process in the background.
+    """
+    if not current_user.organization:
+        raise HTTPException(status_code=400, detail="User has no organization")
+
+    # Set default dates
+    today = datetime.now(timezone.utc).date()
+    if end_date is None:
+        end_date = today
+    if start_date is None:
+        start_date = today - timedelta(days=30)
+        
+    # Initialize Service
+    service = SyncService(db, current_user.organization.id)
+    
+    # Add to background tasks
+    # Note: We can't pass the 'db' session directly to background tasks if it closes after request.
+    # FastAPI Depends(get_async_session) yields a session that closes.
+    # We need a new session or a way to keep it open. 
+    # BUT: Starlette BackgroundTasks run *after* the response is sent. 
+    # Providing a session that relies on the request scope context might be risky if not handled.
+    # For MVP simplicity, we will assume standard FastAPI behavior where we run the task.
+    # HOWEVER: a safer way is to create a new session inside the background task wrapper.
+    # Let's update SyncService to create its own session if needed, OR we trust FastAPI's design (it usually waits).
+    # ACTUALLY: The safest pattern is to pass the session *factory* or manage session inside the task.
+    # But for now, let's try passing the task directly. 
+    # If this fails, we'll need to refactor SyncService to create a new session.
+    
+    # Refactor: To prevent "Session is closed" cleanup errors from FastAPI dependency injection 
+    # interfering with the background task, and to ensure the background task has its own
+    # independent persistent session, we instantiate a new AsyncSession within the task wrapper.
+    
+    from app.database.connection import async_session_factory
+
+    async def _background_task_wrapper(org_id, start, end, refresh):
+        # Create a new session specifically for this background task
+        async with async_session_factory() as session:
+            try:
+                bg_service = SyncService(session, org_id)
+                await bg_service.run_sync(start, end, refresh)
+            except Exception as e:
+                # Catch any unhandled exceptions to ensure session closes cleanly
+                # and doesn't crash the worker ungracefully (though SyncService catches most)
+                import logging
+                logging.getLogger(__name__).error(f"Background task failed: {e}")
+
+    background_tasks.add_task(
+        _background_task_wrapper,
+        current_user.organization.id,
+        start_date,
+        end_date,
+        force_refresh
+    )
+    
+    return {"message": "Insight generation started", "status": "IN_PROGRESS"}
 
 
 

@@ -11,6 +11,9 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, TimestampMixin, UUIDMixin
+from enum import Enum as PyEnum
+from sqlalchemy import String, ForeignKey, Index, Enum, Text
+
 
 if TYPE_CHECKING:
     from app.models.user import User
@@ -21,6 +24,23 @@ if TYPE_CHECKING:
     from app.models.profit_loss_cache import ProfitLossCache
     from app.models.insight import Insight
     from app.models.insight_feedback import InsightFeedback
+
+
+class SyncStatus(str, PyEnum):
+    """Status of the synchronization process."""
+    IDLE = "IDLE"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class SyncStep(str, PyEnum):
+    """Current step of the synchronization process."""
+    CONNECTING = "CONNECTING"
+    IMPORTING = "IMPORTING"  # Fetching data from Xero
+    CALCULATING = "CALCULATING"  # Calculating runway/metrics
+    GENERATING_INSIGHTS = "GENERATING_INSIGHTS"  # AI Analysis
+    COMPLETED = "COMPLETED"
 
 
 class Organization(Base, UUIDMixin, TimestampMixin):
@@ -57,6 +77,23 @@ class Organization(Base, UUIDMixin, TimestampMixin):
     name: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
+    )
+    
+    # Sync Status Tracking
+    sync_status: Mapped[SyncStatus] = mapped_column(
+        Enum(SyncStatus, name="sync_status_enum", create_type=True),
+        default=SyncStatus.IDLE,
+        nullable=False,
+    )
+    
+    sync_step: Mapped[Optional[SyncStep]] = mapped_column(
+        Enum(SyncStep, name="sync_step_enum", create_type=True),
+        nullable=True,
+    )
+    
+    last_sync_error: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
     )
     
     # Foreign keys

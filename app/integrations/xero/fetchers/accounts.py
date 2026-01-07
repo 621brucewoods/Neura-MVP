@@ -5,7 +5,7 @@ Fetches accounts and creates AccountID to AccountType mapping.
 
 import logging
 from typing import Any
-
+import asyncio
 from xero_python.exceptions import ApiException
 
 from app.integrations.xero.exceptions import XeroDataFetchError
@@ -35,8 +35,11 @@ class AccountsFetcher(BaseFetcher):
                 await self.rate_limiter.wait_if_needed(organization_id)
             
             # Execute API call with retry logic
+            # Execute API call with retry logic
+            
             async def _fetch():
-                return self.api.get_accounts(xero_tenant_id=self.tenant_id)
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(None, lambda: self.api.get_accounts(xero_tenant_id=self.tenant_id))
             
             response = await self.retry_handler.execute_with_retry(_fetch)
             

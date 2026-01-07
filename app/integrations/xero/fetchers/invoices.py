@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
-
+import asyncio
 from xero_python.exceptions import ApiException
 
 from app.integrations.xero.exceptions import XeroDataFetchError
@@ -44,22 +44,27 @@ class InvoicesFetcher(BaseFetcher):
                     await self.rate_limiter.wait_if_needed(organization_id)
                 
                 # Execute API call with retry logic
+                # Execute API call with retry logic
+                
                 async def _fetch_page():
-                    try:
-                        # Try with page_size parameter (if SDK supports it)
-                        return self.api.get_invoices(
-                            xero_tenant_id=self.tenant_id,
-                            where=f'Type=="{invoice_type}" AND Status=="AUTHORISED"',
-                            page=page,
-                            # Note: SDK may not support page_size parameter, will use default if not
-                        )
-                    except TypeError:
-                        # SDK doesn't support page_size, use default (100)
-                        return self.api.get_invoices(
-                            xero_tenant_id=self.tenant_id,
-                            where=f'Type=="{invoice_type}" AND Status=="AUTHORISED"',
-                            page=page,
-                        )
+                    loop = asyncio.get_running_loop()
+                    def _do_sync_request():
+                        try:
+                            # Try with page_size parameter (if SDK supports it)
+                            return self.api.get_invoices(
+                                xero_tenant_id=self.tenant_id,
+                                where=f'Type=="{invoice_type}" AND Status=="AUTHORISED"',
+                                page=page,
+                                # Note: SDK may not support page_size parameter, will use default if not
+                            )
+                        except TypeError:
+                            # SDK doesn't support page_size, use default (100)
+                            return self.api.get_invoices(
+                                xero_tenant_id=self.tenant_id,
+                                where=f'Type=="{invoice_type}" AND Status=="AUTHORISED"',
+                                page=page,
+                            )
+                    return await loop.run_in_executor(None, _do_sync_request)
                 
                 response = await self.retry_handler.execute_with_retry(_fetch_page)
                 

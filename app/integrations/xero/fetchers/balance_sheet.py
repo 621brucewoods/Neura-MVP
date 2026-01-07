@@ -6,7 +6,7 @@ Fetches Balance Sheet reports from Xero.
 import logging
 from datetime import date
 from typing import Any
-
+import asyncio
 from xero_python.exceptions import ApiException
 
 from app.integrations.xero.exceptions import XeroDataFetchError
@@ -38,12 +38,15 @@ class BalanceSheetFetcher(BaseFetcher):
                 await self.rate_limiter.wait_if_needed(organization_id)
             
             # Execute API call with retry logic
+            # Execute API call with retry logic
+            
             async def _fetch():
-                return self.api.get_report_balance_sheet(
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(None, lambda: self.api.get_report_balance_sheet(
                     xero_tenant_id=self.tenant_id,
                     date=report_date,
                     standard_layout=True  # CRITICAL: Ensures consistent JSON structure
-                )
+                ))
             
             response = await self.retry_handler.execute_with_retry(_fetch)
             

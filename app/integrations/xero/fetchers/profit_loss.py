@@ -5,6 +5,7 @@ Fetches Profit & Loss reports from Xero.
 
 import logging
 from datetime import date
+import asyncio
 from typing import Any
 
 from xero_python.exceptions import ApiException
@@ -39,13 +40,16 @@ class ProfitLossFetcher(BaseFetcher):
                 await self.rate_limiter.wait_if_needed(organization_id)
             
             # Execute API call with retry logic
+            # Execute API call with retry logic
+            
             async def _fetch():
-                return self.api.get_report_profit_and_loss(
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(None, lambda: self.api.get_report_profit_and_loss(
                     xero_tenant_id=self.tenant_id,
                     from_date=start_date,
                     to_date=end_date,
                     standard_layout=True  # CRITICAL: Ensures consistent JSON structure
-                )
+                ))
             
             response = await self.retry_handler.execute_with_retry(_fetch)
             

@@ -6,7 +6,7 @@ Fetches Trial Balance reports from Xero.
 import logging
 from datetime import date
 from typing import Any
-
+import asyncio
 from xero_python.exceptions import ApiException
 
 from app.integrations.xero.exceptions import XeroDataFetchError
@@ -40,11 +40,14 @@ class TrialBalanceFetcher(BaseFetcher):
                 await self.rate_limiter.wait_if_needed(organization_id)
             
             # Execute API call with retry logic
+            # Execute API call with retry logic
+            
             async def _fetch():
-                return self.api.get_report_trial_balance(
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(None, lambda: self.api.get_report_trial_balance(
                     xero_tenant_id=self.tenant_id,
                     date=report_date
-                )
+                ))
             
             response = await self.retry_handler.execute_with_retry(_fetch)
             
