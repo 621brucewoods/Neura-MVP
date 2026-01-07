@@ -30,10 +30,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-# Temporarily enable DEBUG logging for profitability calculator to trace P&L issues
-logging.getLogger("app.insights.profitability_calculator").setLevel(logging.DEBUG)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     """

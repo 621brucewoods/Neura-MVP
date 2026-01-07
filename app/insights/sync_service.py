@@ -20,6 +20,7 @@ from app.insights.service import InsightsService
 from app.insights.data_summarizer import DataSummarizer
 from app.insights.insight_generator import InsightGenerator
 from app.models.insight import Insight as InsightModel
+from app.models.calculated_metrics import CalculatedMetrics
 from sqlalchemy import select, and_
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,46 @@ class SyncService:
             await self._update_status(SyncStatus.IN_PROGRESS, SyncStep.CALCULATING)
             metrics = InsightsService.calculate_all_insights(financial_data, data_fetcher)
             raw_data_summary = DataSummarizer.summarize(financial_data, start_date, end_date, data_fetcher)
+
+            # Persist Metrics Snapshot
+            # This allows the dashboard to load without re-fetching Xero data
+            generated_at = datetime.now(timezone.utc)
+            
+            # Serialize metrics for storage
+            metrics_payload = {
+                "cash_runway": metrics["cash_runway"].model_dump(),
+                "cash_pressure": metrics["cash_pressure"].model_dump(),
+                "leading_indicators": metrics["leading_indicators"].model_dump(),
+                "profitability": metrics["profitability"].model_dump(),
+                "upcoming_commitments": metrics["upcoming_commitments"].model_dump(),
+            }
+            
+            stmt = select(CalculatedMetrics).where(CalculatedMetrics.organization_id == self.organization_id)
+            result = await self.db.execute(stmt)
+            calc_metrics = result.scalar_one_or_none()
+            
+            if calc_metrics:
+                # Update existing
+                calc_metrics.metrics_payload = metrics_payload
+                calc_metrics.calculated_at = generated_at
+                calc_metrics.data_period_start = start_date
+                calc_metrics.data_period_end = end_date
+                
+                # Also update the individual columns for queryability (optional but good practice)
+                # calc_metrics.runway_months = metrics["cash_runway"].runway_months
+                # calc_metrics.total_cash = metrics["cash_runway"].current_cash
+            else:
+                # Create new
+                calc_metrics = CalculatedMetrics(
+                    organization_id=self.organization_id,
+                    metrics_payload=metrics_payload,
+                    calculated_at=generated_at,
+                    data_period_start=start_date,
+                    data_period_end=end_date,
+                )
+                self.db.add(calc_metrics)
+                
+            await self.db.commit()
 
             # 5. Generate AI Insights (The Slow Part)
             await self._update_status(SyncStatus.IN_PROGRESS, SyncStep.GENERATING_INSIGHTS)

@@ -10,7 +10,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import String, Text, ForeignKey, DateTime, Numeric, Index
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, TimestampMixin, UUIDMixin
@@ -186,6 +186,12 @@ class CalculatedMetrics(Base, UUIDMixin, TimestampMixin):
         DateTime(timezone=True),
         nullable=True,
         comment="End of data period used for calculations",
+    )
+    
+    metrics_payload: Mapped[Optional[dict]] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="Full JSON payload of calculated metrics for dashboard display",
     )
     
     # Relationships

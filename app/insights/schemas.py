@@ -111,7 +111,17 @@ class Insight(BaseModel):
     data_notes: Optional[str] = Field(None, description="Optional notes about data quality or limitations")
     generated_at: str = Field(..., description="ISO timestamp when insight was generated")
     is_acknowledged: bool = Field(default=False, description="Whether insight has been acknowledged")
+    is_acknowledged: bool = Field(default=False, description="Whether insight has been acknowledged")
     is_marked_done: bool = Field(default=False, description="Whether insight has been marked as done")
+
+
+class InsightUpdate(BaseModel):
+    """Body for updating an insight's state."""
+    
+    model_config = ConfigDict(extra="forbid")
+    
+    is_acknowledged: Optional[bool] = Field(None, description="Set acknowledgment status")
+    is_marked_done: Optional[bool] = Field(None, description="Set completion status")
 
 
 class InsightsResponse(BaseModel):
@@ -122,7 +132,11 @@ class InsightsResponse(BaseModel):
     cash_pressure: CashPressureMetrics = Field(..., description="Cash pressure status")
     profitability: ProfitabilityMetrics = Field(..., description="Profitability analysis")
     upcoming_commitments: UpcomingCommitmentsMetrics = Field(..., description="Upcoming cash commitments")
-    insights: list[Insight] = Field(default_factory=list, description="Top 1-3 insights ranked by urgency")
+    insights: list[Insight] = Field(default_factory=list, description="Paginated list of insights")
+    pagination: dict[str, int] = Field(
+        default_factory=lambda: {"total": 0, "page": 1, "limit": 20, "total_pages": 0},
+        description="Pagination metadata"
+    )
     calculated_at: str = Field(..., description="ISO timestamp when insights were calculated")
     raw_data_summary: dict[str, Any] = Field(..., description="Compact summary of raw financial data for AI analysis")
 
