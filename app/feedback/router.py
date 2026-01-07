@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.dependencies import get_current_user, AdminUser
+from app.auth.dependencies import get_current_user, get_admin_user
 from app.database.connection import get_async_session
 from app.feedback.schemas import (
     FeedbackItem,
@@ -168,7 +168,7 @@ async def get_all_feedback(
     end_date: Optional[datetime] = Query(None, description="Filter by end date"),
     limit: int = Query(100, ge=1, le=1000, description="Pagination limit"),
     offset: int = Query(0, ge=0, description="Pagination offset"),
-    admin_user: User = AdminUser,
+    admin_user = Depends(get_admin_user),
     db: AsyncSession = Depends(get_async_session),
 ) -> FeedbackListResponse:
     """
@@ -237,7 +237,7 @@ async def get_feedback_summary(
     insight_type: Optional[str] = Query(None, description="Filter by insight type"),
     start_date: Optional[datetime] = Query(None, description="Filter by start date"),
     end_date: Optional[datetime] = Query(None, description="Filter by end date"),
-    admin_user: User = AdminUser,
+    admin_user = Depends(get_admin_user),
     db: AsyncSession = Depends(get_async_session),
 ) -> FeedbackSummaryResponse:
     """
@@ -336,6 +336,5 @@ async def get_feedback_summary(
         )
         
     except Exception:
-        # Global exception handler will sanitize this
         raise
 

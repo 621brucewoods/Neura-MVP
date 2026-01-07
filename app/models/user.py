@@ -74,7 +74,7 @@ class User(Base, UUIDMixin, TimestampMixin):
     
     # Role
     role: Mapped[UserRole] = mapped_column(
-        Enum(UserRole, name="user_role_enum", create_type=True),
+        Enum(UserRole, name="user_role_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         default=UserRole.USER,
         nullable=False,
         comment="User role: user or admin",
