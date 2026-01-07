@@ -37,8 +37,6 @@ router = APIRouter(prefix="/api/insights", tags=["Insights"])
 )
 async def get_insights(
     current_user: User = Depends(get_current_user),
-    start_date: Optional[date] = Query(None, description="Start date for P&L period (YYYY-MM-DD). Defaults to 30 days ago."),
-    end_date: Optional[date] = Query(None, description="End date for P&L period (YYYY-MM-DD). Defaults to today."),
     page: int = Query(1, ge=1, description="Page number (1-based)"),
     limit: int = Query(5, ge=1, le=100, description="Items per page (default 5 for dashboard)"),
     insight_type: Optional[str] = Query(None, description="Filter by insight type"),
@@ -63,27 +61,6 @@ async def get_insights(
             detail="User has no organization",
         )
     
-    # Set default dates if not provided
-    today = datetime.now(timezone.utc).date()
-    if end_date is None:
-        end_date = today
-    if start_date is None:
-        start_date = today - timedelta(days=30)
-    
-    # Validate date range
-    if start_date >= end_date:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="start_date must be before end_date",
-        )
-    
-    # Validate end_date is not in future
-    if end_date > today:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="end_date cannot be in the future",
-        )
-    
     try:
         # 1. Fetch Latest Metrics Snapshot (The "Scoreboard")
         stmt = select(CalculatedMetrics).where(
@@ -92,31 +69,22 @@ async def get_insights(
         result = await db.execute(stmt)
         calc_metrics = result.scalar_one_or_none()
         
-        # If no metrics yet, we might be in the middle of a sync or never synced.
-        # Check Sync Status to give better error? Or just return zeros?
         # For now, if no metrics, we can't show dashboard. 
         if not calc_metrics or not calc_metrics.metrics_payload:
-            # We could return a neutral response or 404.
-            # Let's return a "Not Ready" compatible response with empty data
-            # OR check sync status.
-            # Simpler: raise 404 "Please trigger sync first"
-            # But the UI might want to show "Loading..."
-            # Let's assume frontend checks /status first.
-             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="No financial data found. Please trigger a sync.",
-            )
-
-        metrics_payload = calc_metrics.metrics_payload
+            # Return empty structure if no data yet (UX: Empty Dashboard State)
+            metrics_payload = {
+                "cash_runway": None,
+                "leading_indicators": [],
+                "cash_pressure": None,
+                "profitability": None,
+                "upcoming_commitments": None
+            }
+            calculated_at_iso = None
+        else:
+            metrics_payload = calc_metrics.metrics_payload
+            calculated_at_iso = calc_metrics.calculated_at.isoformat()
         
-        # 2. Fetch Insights (The "Commentary")
-        # Fetch Insights with Pagination and Filtering
-        # Base query
-        stmt = select(InsightModel).where(
-            InsightModel.organization_id == current_user.organization.id
-        ).order_by(desc(InsightModel.generated_at))
         
-       
         # Fetch Insights with Pagination and Filtering
         # Base query
         stmt = select(InsightModel).where(
@@ -162,11 +130,7 @@ async def get_insights(
                 "is_acknowledged": saved_insight.is_acknowledged,
                 "is_marked_done": saved_insight.is_marked_done,
             })
-            
-        # Raw data summary (optional, maybe not needed for display if we don't generate)
-        raw_data_summary = DataSummarizer.summarize(financial_data, start_date, end_date, data_fetcher)
         
-
         
         return InsightsResponse(
             cash_runway=metrics_payload["cash_runway"],
@@ -181,7 +145,7 @@ async def get_insights(
                 "limit": limit,
                 "total_pages": total_pages,
             },
-            calculated_at=calc_metrics.calculated_at.isoformat(),
+            calculated_at=calculated_at_iso or datetime.now(timezone.utc).isoformat(),
             raw_data_summary={}, # Not storing raw summary in snapshot currently, can be added if needed
         )
         
