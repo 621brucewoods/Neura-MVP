@@ -74,7 +74,7 @@ async def get_insights(
             # Return empty structure if no data yet (UX: Empty Dashboard State)
             metrics_payload = {
                 "cash_runway": None,
-                "leading_indicators": [],
+                "leading_indicators": None,
                 "cash_pressure": None,
                 "profitability": None,
                 "upcoming_commitments": None
