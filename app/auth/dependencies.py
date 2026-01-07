@@ -96,3 +96,35 @@ async def get_current_user(
 
 # Type alias for cleaner route signatures
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+async def get_admin_user(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """
+    Dependency that ensures user has admin role.
+    
+    Usage:
+        @app.get("/admin-only")
+        async def admin_route(admin: User = Depends(get_admin_user)):
+            return {"message": "Admin access"}
+    
+    Args:
+        current_user: Authenticated user from get_current_user
+        
+    Returns:
+        User instance (guaranteed to be admin)
+        
+    Raises:
+        HTTPException: If user is not an admin
+    """
+    if not current_user.is_admin():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    return current_user
+
+
+# Type alias for admin routes
+AdminUser = Annotated[User, Depends(get_admin_user)]

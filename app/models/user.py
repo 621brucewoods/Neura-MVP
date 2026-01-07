@@ -7,14 +7,21 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import String, Boolean, Index, Integer, DateTime
+from sqlalchemy import String, Boolean, Index, Integer, DateTime, Enum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from enum import Enum as PyEnum
 
 from app.database.base import Base, TimestampMixin, UUIDMixin
 
 if TYPE_CHECKING:
     from app.models.organization import Organization
     from app.models.insight_feedback import InsightFeedback
+
+
+class UserRole(str, PyEnum):
+    """User role enumeration."""
+    USER = "user"
+    ADMIN = "admin"
 
 
 class User(Base, UUIDMixin, TimestampMixin):
@@ -65,6 +72,14 @@ class User(Base, UUIDMixin, TimestampMixin):
         nullable=False,
     )
     
+    # Role
+    role: Mapped[UserRole] = mapped_column(
+        Enum(UserRole, name="user_role_enum", create_type=True),
+        default=UserRole.USER,
+        nullable=False,
+        comment="User role: user or admin",
+    )
+    
     # Account lockout fields
     failed_login_attempts: Mapped[int] = mapped_column(
         Integer,
@@ -113,6 +128,10 @@ class User(Base, UUIDMixin, TimestampMixin):
             return False
         return datetime.now(timezone.utc) < self.locked_until
     
+    def is_admin(self) -> bool:
+        """Check if user has admin role."""
+        return self.role == UserRole.ADMIN
+    
     def __repr__(self) -> str:
-        return f"<User(id={self.id}, email={self.email!r}, is_active={self.is_active})>"
+        return f"<User(id={self.id}, email={self.email!r}, is_active={self.is_active}, role={self.role.value})>"
 

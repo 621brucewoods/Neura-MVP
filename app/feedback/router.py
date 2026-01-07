@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import get_current_user, AdminUser
 from app.database.connection import get_async_session
 from app.feedback.schemas import (
     FeedbackItem,
@@ -168,14 +168,11 @@ async def get_all_feedback(
     end_date: Optional[datetime] = Query(None, description="Filter by end date"),
     limit: int = Query(100, ge=1, le=1000, description="Pagination limit"),
     offset: int = Query(0, ge=0, description="Pagination offset"),
-    current_user: User = Depends(get_current_user),
+    admin_user: User = AdminUser,
     db: AsyncSession = Depends(get_async_session),
 ) -> FeedbackListResponse:
     """
-    Get all feedback with filtering and pagination.
-    
-    Note: In MVP, this is accessible to all authenticated users.
-    Future: Add admin role check.
+    Get all feedback with filtering and pagination (admin only).
     """
     try:
         # Build query
@@ -240,17 +237,14 @@ async def get_feedback_summary(
     insight_type: Optional[str] = Query(None, description="Filter by insight type"),
     start_date: Optional[datetime] = Query(None, description="Filter by start date"),
     end_date: Optional[datetime] = Query(None, description="Filter by end date"),
-    current_user: User = Depends(get_current_user),
+    admin_user: User = AdminUser,
     db: AsyncSession = Depends(get_async_session),
 ) -> FeedbackSummaryResponse:
     """
-    Get aggregated feedback summary.
+    Get aggregated feedback summary (admin only).
     
     Groups feedback by insight_type and insight_title, calculating
     helpful percentages and including sample comments.
-    
-    Note: In MVP, this is accessible to all authenticated users.
-    Future: Add admin role check.
     """
     try:
         # Build base query
