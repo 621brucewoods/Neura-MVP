@@ -242,6 +242,21 @@ class InsightsService:
             balance_sheet_prior,
             fetcher
         )
+        # Attach a simple runway confidence for MVP UI (High/Medium/Low)
+        try:
+            runway_months = cash_runway.get("runway_months")
+            status = cash_runway.get("status") or ""
+            if runway_months is not None:
+                cash_runway["confidence_level"] = "High"
+            elif status in ("negative", "infinite"):
+                cash_runway["confidence_level"] = "High"
+            elif status in ("healthy", "warning", "critical"):
+                cash_runway["confidence_level"] = "Medium"
+            else:
+                cash_runway["confidence_level"] = "Medium"
+        except Exception:
+            # Fallback conservatively
+            cash_runway["confidence_level"] = "Medium"
         
         leading_indicators = InsightsService.calculate_leading_indicators(
             receivables,

@@ -23,6 +23,10 @@ from app.models.calculated_metrics import CalculatedMetrics
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, desc, func
 from app.database.connection import async_session_factory
+from app.integrations.xero.cache_service import CacheService
+from app.integrations.xero.sdk_client import create_xero_sdk_client, XeroSDKClientError
+from app.integrations.xero.data_fetcher import XeroDataFetcher
+from app.insights.insight_generator import InsightGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +42,7 @@ router = APIRouter(prefix="/api/insights", tags=["Insights"])
 async def get_insights(
     current_user: User = Depends(get_current_user),
     page: int = Query(1, ge=1, description="Page number (1-based)"),
-    limit: int = Query(5, ge=1, le=100, description="Items per page (default 5 for dashboard)"),
+    limit: int = Query(3, ge=1, le=100, description="Items per page (default 3 for dashboard)"),
     insight_type: Optional[str] = Query(None, description="Filter by insight type"),
     severity: Optional[str] = Query(None, description="Filter by severity (high, medium, low)"),
     db: AsyncSession = Depends(get_async_session),
@@ -115,7 +119,7 @@ async def get_insights(
         # Format for response
         insights_with_engagement = []
         for saved_insight in saved_insights:
-             insights_with_engagement.append({
+            insights_with_engagement.append({
                 "insight_id": saved_insight.insight_id,
                 "insight_type": saved_insight.insight_type,
                 "title": saved_insight.title,
@@ -130,6 +134,24 @@ async def get_insights(
                 "is_acknowledged": saved_insight.is_acknowledged,
                 "is_marked_done": saved_insight.is_marked_done,
             })
+
+        # In-memory ranking: severity > confidence > generated_at (desc)
+        def _sev_weight(v: Optional[str]) -> int:
+            m = {"high": 3, "medium": 2, "low": 1}
+            return m.get((v or "").lower(), 0)
+
+        def _conf_weight(v: Optional[str]) -> int:
+            m = {"high": 3, "medium": 2, "low": 1}
+            return m.get((v or "").lower(), 0)
+
+        insights_with_engagement.sort(
+            key=lambda x: (
+                _sev_weight(x.get("severity")),
+                _conf_weight(x.get("confidence_level")),
+                x.get("generated_at", ""),
+            ),
+            reverse=True,
+        )
         
         
         return InsightsResponse(

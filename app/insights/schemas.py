@@ -17,6 +17,7 @@ class CashRunwayMetrics(BaseModel):
     runway_months: Optional[float] = Field(None, description="Cash runway in months (None if profitable or infinite)")
     runway_weeks: Optional[float] = Field(None, description="Cash runway in weeks (None if profitable or infinite)")
     status: str = Field(..., description="Runway status: healthy, warning, critical, negative, or infinite")
+    confidence_level: Optional[str] = Field(None, description="Confidence level: High, Medium, or Low")
 
 
 class ReceivablesHealth(BaseModel):
