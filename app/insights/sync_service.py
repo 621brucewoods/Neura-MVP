@@ -9,7 +9,7 @@ import traceback
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.organization import Organization, SyncStatus, SyncStep
@@ -21,7 +21,13 @@ from app.insights.data_summarizer import DataSummarizer
 from app.insights.insight_generator import InsightGenerator
 from app.models.insight import Insight as InsightModel
 from app.models.calculated_metrics import CalculatedMetrics
-from sqlalchemy import select, and_
+from app.insights.schemas import (
+    CashRunwayMetrics,
+    LeadingIndicatorsMetrics,
+    CashPressureMetrics,
+    ProfitabilityMetrics,
+    UpcomingCommitmentsMetrics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +82,8 @@ class SyncService:
                 sdk_client = await create_xero_sdk_client(self.organization_id, self.db)
                 data_fetcher = XeroDataFetcher(sdk_client, cache_service=cache_service, db=self.db)
             except Exception as e:
-                 await self._update_status(SyncStatus.FAILED, None, error=f"Xero Connection Error: {str(e)}")
-                 return
+                await self._update_status(SyncStatus.FAILED, None, error=f"Xero Connection Error: {str(e)}")
+                return
 
             # 3. Fetch Data
             await self._update_status(SyncStatus.IN_PROGRESS, SyncStep.IMPORTING)
@@ -101,13 +107,24 @@ class SyncService:
             # This allows the dashboard to load without re-fetching Xero data
             generated_at = datetime.now(timezone.utc)
             
-            # Serialize metrics for storage
+            # Convert dictionaries to Pydantic models, then serialize for storage
+            # This validates the structure and ensures consistency with the API schema
+            def serialize_metric(metric_dict, model_class):
+                """Convert metric dict to Pydantic model and serialize."""
+                if not metric_dict:
+                    return None
+                try:
+                    return model_class(**metric_dict).model_dump()
+                except Exception as e:
+                    logger.warning(f"Failed to serialize {model_class.__name__}: {e}, using dict as-is")
+                    return metric_dict
+            
             metrics_payload = {
-                "cash_runway": metrics["cash_runway"].model_dump(),
-                "cash_pressure": metrics["cash_pressure"].model_dump(),
-                "leading_indicators": metrics["leading_indicators"].model_dump(),
-                "profitability": metrics["profitability"].model_dump(),
-                "upcoming_commitments": metrics["upcoming_commitments"].model_dump(),
+                "cash_runway": serialize_metric(metrics.get("cash_runway"), CashRunwayMetrics),
+                "cash_pressure": serialize_metric(metrics.get("cash_pressure"), CashPressureMetrics),
+                "leading_indicators": serialize_metric(metrics.get("leading_indicators"), LeadingIndicatorsMetrics),
+                "profitability": serialize_metric(metrics.get("profitability"), ProfitabilityMetrics),
+                "upcoming_commitments": serialize_metric(metrics.get("upcoming_commitments"), UpcomingCommitmentsMetrics),
             }
             
             stmt = select(CalculatedMetrics).where(CalculatedMetrics.organization_id == self.organization_id)
