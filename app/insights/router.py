@@ -85,7 +85,7 @@ async def get_insights(
             calculated_at_iso = calc_metrics.calculated_at.isoformat()
         
         
-        # Fetch Insights with Pagination and Filtering
+        # 2. Fetch Insights (The "Commentary")
         # Base query
         stmt = select(InsightModel).where(
             InsightModel.organization_id == current_user.organization.id
