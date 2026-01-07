@@ -90,7 +90,7 @@ class AIInsightService:
                         "schema": schema,
                     },
                 },
-                temperature=0.7,
+                temperature=0.1,
             )
             
             content = response.choices[0].message.content
