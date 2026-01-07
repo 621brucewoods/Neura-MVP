@@ -90,8 +90,8 @@ async def get_insights(
             db=db,
         )
         
-        # Create data fetcher with SDK client and cache service
-        data_fetcher = XeroDataFetcher(sdk_client, cache_service=cache_service)
+        # Create data fetcher with SDK client, cache service, and DB session
+        data_fetcher = XeroDataFetcher(sdk_client, cache_service=cache_service, db=db)
         
         # Fetch all data (with caching)
         financial_data = await data_fetcher.fetch_all_data(
@@ -100,6 +100,11 @@ async def get_insights(
             end_date=end_date,
             force_refresh=force_refresh,
         )
+        
+        # Commit token updates before blocking OpenAI call
+        # This ensures the session is clean and prevents deadlocks
+        if data_fetcher.session_manager:
+            await data_fetcher.session_manager.commit_all()
         
         # Calculate insights from fetched data
         metrics = InsightsService.calculate_all_insights(financial_data, data_fetcher)
@@ -168,9 +173,11 @@ async def get_insights(
                 db.add(new_insight)
                 saved_insights.append(new_insight)
         
+        # Commit insights to database
+        # Token updates were already committed before OpenAI call
         await db.commit()
         
-        # Refresh to get updated data
+        # Refresh insights to get updated data
         for insight in saved_insights:
             await db.refresh(insight)
         
@@ -201,17 +208,12 @@ async def get_insights(
             raw_data_summary=raw_data_summary,
         )
         
-    except XeroSDKClientError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=e.message,
-        )
-    except Exception as e:
-        logger.error("Error calculating insights: %s", e, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to calculate insights: {str(e)}",
-        )
+    except XeroSDKClientError:
+        # Global exception handler will sanitize this
+        raise
+    except Exception:
+        # Global exception handler will sanitize this
+        raise
 
 
 @router.get(
@@ -295,12 +297,9 @@ async def list_insights(
             "insights": insights_list,
         }
         
-    except Exception as e:
-        logger.error("Error listing insights: %s", e, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list insights: {str(e)}",
-        )
+    except Exception:
+        # Global exception handler will sanitize this
+        raise
 
 
 @router.get(
@@ -359,7 +358,7 @@ async def get_insight_detail(
         )
         
         # Create data fetcher
-        data_fetcher = XeroDataFetcher(sdk_client, cache_service=cache_service)
+        data_fetcher = XeroDataFetcher(sdk_client, cache_service=cache_service, db=db)
         
         # Fetch all data
         financial_data = await data_fetcher.fetch_all_data(
@@ -368,6 +367,11 @@ async def get_insight_detail(
             end_date=end_date,
             force_refresh=False,
         )
+        
+        # Commit token updates before blocking OpenAI call
+        # This ensures the session is clean and prevents deadlocks
+        if data_fetcher.session_manager:
+            await data_fetcher.session_manager.commit_all()
         
         # Calculate metrics
         metrics = InsightsService.calculate_all_insights(financial_data, data_fetcher)
@@ -400,19 +404,14 @@ async def get_insight_detail(
             detail=f"Insight with ID {insight_id} not found",
         )
         
-    except XeroSDKClientError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=e.message,
-        )
+    except XeroSDKClientError:
+        # Global exception handler will sanitize this
+        raise
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error("Error fetching insight detail: %s", e, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch insight: {str(e)}",
-        )
+    except Exception:
+        # Global exception handler will sanitize this
+        raise
 
 
 @router.post(
@@ -471,13 +470,10 @@ async def acknowledge_insight(
         
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         await db.rollback()
-        logger.error("Error acknowledging insight: %s", e, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to acknowledge insight: {str(e)}",
-        )
+        # Global exception handler will sanitize this
+        raise
 
 
 @router.post(
@@ -536,13 +532,10 @@ async def mark_insight_done(
         
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         await db.rollback()
-        logger.error("Error marking insight as done: %s", e, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to mark insight as done: {str(e)}",
-        )
+        # Global exception handler will sanitize this
+        raise
 
 
 

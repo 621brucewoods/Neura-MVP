@@ -12,7 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import get_current_user
 from app.database import get_async_session
 from app.integrations.xero.oauth import XeroOAuth, XeroOAuthError, xero_oauth
-from app.integrations.xero.data_fetcher import XeroDataFetcher, XeroDataFetchError
+from app.integrations.xero.data_fetcher import XeroDataFetcher
+from app.integrations.xero.exceptions import XeroDataFetchError
 from app.integrations.xero.sdk_client import create_xero_sdk_client, XeroSDKClientError
 from app.integrations.xero.cache_service import CacheService
 from app.integrations.xero.schemas import (
@@ -159,11 +160,9 @@ async def xero_callback(
             organization_name=xero_org_name,
         )
         
-    except XeroOAuthError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Xero OAuth error: {e.message}",
-        )
+    except XeroOAuthError:
+        # Global exception handler will sanitize this
+        raise
 
 
 @router.get(
@@ -369,11 +368,9 @@ async def refresh_xero_tokens(
             expires_at=updated_token.expires_at,
         )
         
-    except XeroOAuthError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Token refresh failed: {e.message}",
-        )
+    except XeroOAuthError:
+        # Global exception handler will sanitize this
+        raise
 
 
 @router.get(
@@ -435,8 +432,8 @@ async def sync_xero_data(
             db=db,
         )
         
-        # Create data fetcher with SDK client and cache service
-        data_fetcher = XeroDataFetcher(sdk_client, cache_service=cache_service)
+        # Create data fetcher with SDK client, cache service, and DB session
+        data_fetcher = XeroDataFetcher(sdk_client, cache_service=cache_service, db=db)
         
         # Fetch all data (with caching)
         data = await data_fetcher.fetch_all_data(
@@ -445,6 +442,9 @@ async def sync_xero_data(
             end_date=end_date,
             force_refresh=force_refresh,
         )
+        
+        # Note: Token updates are flushed automatically by fetchers
+        # FastAPI will auto-commit everything at the end
         
         # Calculate period description
         days_diff = (end_date - start_date).days
@@ -457,18 +457,12 @@ async def sync_xero_data(
             fetched_at=data.get("fetched_at", ""),
         )
         
-    except XeroSDKClientError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=e.message,
-        )
-    except XeroDataFetchError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to fetch Xero data: {e.message}",
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unexpected error: {str(e)}",
-        )
+    except XeroSDKClientError:
+        # Global exception handler will sanitize this
+        raise
+    except XeroDataFetchError:
+        # Global exception handler will sanitize this
+        raise
+    except Exception:
+        # Global exception handler will sanitize this
+        raise

@@ -154,12 +154,15 @@ class XeroSDKClient:
         """Get Xero tenant ID."""
         return self.token.xero_tenant_id
     
-    async def commit_token_updates(self) -> None:
+    async def commit_token_updates(self, skip_commit: bool = False) -> None:
         """
         Commit any token updates to database with race condition protection.
         
         Uses a per-organization lock to prevent multiple concurrent processes
         from refreshing the token simultaneously, which would cause invalid_grant errors.
+        
+        Args:
+            skip_commit: If True, only flush changes (for use in request context where FastAPI auto-commits)
         
         CRITICAL: Must commit in-memory changes BEFORE refreshing from database,
         otherwise db.refresh() will overwrite the updated token values.
@@ -174,6 +177,14 @@ class XeroSDKClient:
             # Save the refresh_token we have in memory (from _save_token callback)
             # This is the NEW token that SDK just refreshed
             in_memory_refresh_token = self.token.refresh_token
+            
+            if skip_commit:
+                # In request context - just flush, let FastAPI auto-commit handle it
+                await self.xero_service.db.flush()
+                # Update _token_dict to match current state
+                self._token_dict = self._build_token_dict()
+                logger.debug("Flushed token updates for organization %s (will be committed by FastAPI)", organization_id)
+                return
             
             # Commit our in-memory token updates to database
             # self.token has the updated values from _save_token() callback

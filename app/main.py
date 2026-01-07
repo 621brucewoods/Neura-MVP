@@ -17,6 +17,7 @@ from slowapi.util import get_remote_address
 from app.auth.rate_limit import limiter
 from app.auth.router import router as auth_router
 from app.config import settings
+from app.core.errors import global_exception_handler
 from app.database import close_db
 from app.integrations.xero.router import router as xero_router
 from app.insights.router import router as insights_router
@@ -71,6 +72,9 @@ def create_application() -> FastAPI:
     # Configure rate limiting
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    
+    # Configure global exception handler for sanitized error responses
+    app.add_exception_handler(Exception, global_exception_handler)
     
     # Configure CORS
     app.add_middleware(

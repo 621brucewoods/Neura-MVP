@@ -107,13 +107,10 @@ async def submit_feedback(
                 updated_at=None,
             )
             
-    except Exception as e:
+    except Exception:
         await db.rollback()
-        logger.error("Error submitting feedback: %s", e, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to submit feedback: {str(e)}",
-        )
+        # Global exception handler will sanitize this
+        raise
 
 
 @router.get(
@@ -153,12 +150,9 @@ async def get_user_feedback(
         
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error("Error fetching feedback: %s", e, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch feedback: {str(e)}",
-        )
+    except Exception:
+        # Global exception handler will sanitize this
+        raise
 
 
 @router.get(
@@ -231,12 +225,9 @@ async def get_all_feedback(
             feedback=feedback_list,
         )
         
-    except Exception as e:
-        logger.error("Error fetching all feedback: %s", e, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch feedback: {str(e)}",
-        )
+    except Exception:
+        # Global exception handler will sanitize this
+        raise
 
 
 @router.get(
@@ -350,10 +341,7 @@ async def get_feedback_summary(
             ),
         )
         
-    except Exception as e:
-        logger.error("Error fetching feedback summary: %s", e, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch feedback summary: {str(e)}",
-        )
+    except Exception:
+        # Global exception handler will sanitize this
+        raise
 
