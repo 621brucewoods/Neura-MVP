@@ -3,9 +3,9 @@
 ## Cash Flow Estimation Issue
 
 **Current Problem:**
-The system estimates `cash_received` and `cash_spent` from balance sheet changes, which is inaccurate.
+The system estimates `cash_received` and `cash_spent` from balance sheet changes, which is not fully accurate.
 
-**Why It's Wrong:**
+**Why It may Wrong:**
 - If cash increased by $10k, it assumes: received=$10k, spent=$0
 - Reality could be: received=$50k, spent=$40k, net=$10k
 - This causes incorrect burn rate and runway calculations
