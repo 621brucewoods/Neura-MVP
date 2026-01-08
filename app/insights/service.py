@@ -254,9 +254,23 @@ class InsightsService:
                 cash_runway["confidence_level"] = "Medium"
             else:
                 cash_runway["confidence_level"] = "Medium"
+            # Confidence details for explainability
+            details: list[str] = []
+            # Input coverage checks
+            if not balance_sheet_current:
+                details.append("missing_balance_sheet_current")
+            if not balance_sheet_prior:
+                details.append("missing_balance_sheet_prior")
+            # Derivation method (we approximate cash flows from BS deltas in MVP)
+            details.append("approx_burn_from_balance_sheet")
+            # Basic plausibility check
+            if cash_runway.get("current_cash") is None:
+                details.append("cash_extraction_failed")
+            cash_runway["confidence_details"] = details or None
         except Exception:
             # Fallback conservatively
             cash_runway["confidence_level"] = "Medium"
+            cash_runway["confidence_details"] = ["confidence_estimation_error"]
         
         leading_indicators = InsightsService.calculate_leading_indicators(
             receivables,
@@ -269,6 +283,17 @@ class InsightsService:
         cash_pressure = InsightsService.calculate_cash_pressure(
             cash_runway
         )
+        # Propagate minimal confidence details to cash pressure
+        try:
+            pressure_details: list[str] = ["derived_from_runway"]
+            runway_conf = (cash_runway.get("confidence_level") or "").lower()
+            if runway_conf in ("medium", "low"):
+                pressure_details.append("low_runway_confidence")
+            if cash_runway.get("confidence_details"):
+                pressure_details.extend([f"runway:{d}" for d in cash_runway["confidence_details"]])
+            cash_pressure["confidence_details"] = pressure_details
+        except Exception:
+            pass
         
         profitability = InsightsService.calculate_profitability(
             profit_loss,

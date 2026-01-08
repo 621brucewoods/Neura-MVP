@@ -18,6 +18,7 @@ class CashRunwayMetrics(BaseModel):
     runway_weeks: Optional[float] = Field(None, description="Cash runway in weeks (None if profitable or infinite)")
     status: str = Field(..., description="Runway status: healthy, warning, critical, negative, or infinite")
     confidence_level: Optional[str] = Field(None, description="Confidence level: High, Medium, or Low")
+    confidence_details: Optional[list[str]] = Field(default=None, description="Machine-readable reasons affecting confidence (e.g., missing_prior_balance_sheet, approx_burn_from_balance_sheet)")
 
 
 class ReceivablesHealth(BaseModel):
@@ -66,6 +67,7 @@ class CashPressureMetrics(BaseModel):
     
     status: str = Field(..., description="Cash pressure status: GREEN, AMBER, or RED")
     confidence: str = Field(..., description="Confidence level: high, medium, or low")
+    confidence_details: Optional[list[str]] = Field(default=None, description="Machine-readable reasons affecting confidence")
 
 
 class ProfitabilityMetrics(BaseModel):
