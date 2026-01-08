@@ -15,6 +15,7 @@ The system estimates `cash_received` and `cash_spent` from balance sheet changes
 - No `standard_layout` parameter or cell attributes with IDs
 - Would require keyword matching (unreliable, breaks with custom labels)
 
+
 **Status:**
 - Current: Approximation (documented limitation)
 - Future: Need real Xero data samples to verify Executive Summary structure
