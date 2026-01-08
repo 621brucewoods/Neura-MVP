@@ -6,6 +6,7 @@ API endpoints for Xero OAuth 2.0 flow and data fetching.
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +30,7 @@ from app.integrations.xero.service import XeroService
 from app.integrations.xero.state_store import oauth_state_store
 from app.models.organization import Organization
 from app.models.user import User
+from app.config import settings
 
 
 router = APIRouter(prefix="/integrations/xero", tags=["Xero Integration"])
@@ -152,12 +154,9 @@ async def xero_callback(
             xero_tenant_id=xero_tenant_id,
         )
         
-        return XeroCallbackResponse(
-            success=True,
-            message="Xero connected successfully",
-            xero_tenant_id=xero_tenant_id,
-            organization_name=xero_org_name,
-        )
+        # Minimal change: redirect back to frontend after successful connect
+        redirect_url = f"{settings.frontend_app_url}/integrations/xero/connected?result=success"
+        return RedirectResponse(url=redirect_url, status_code=302)
         
     except XeroOAuthError:
         # Global exception handler will sanitize this
