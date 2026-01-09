@@ -291,8 +291,8 @@ async def refresh_xero_tokens(
 )
 async def sync_xero_data(
     current_user: User = Depends(get_current_user),
-    start_date: date = Query(..., description="Start date for P&L period (YYYY-MM-DD)"),
-    end_date: date = Query(..., description="End date for P&L period (YYYY-MM-DD)"),
+    start_date: date | None = Query(None, description="Start date for P&L period (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="End date for P&L period (YYYY-MM-DD)"),
     force_refresh: bool = Query(
         default=False,
         description="If true, bypass cache and fetch fresh data from Xero"
@@ -318,14 +318,18 @@ async def sync_xero_data(
             detail="User has no organization",
         )
     
+    # Default dates: last 30 days if not provided
+    today = date.today()
+    if end_date is None:
+        end_date = today
+    if start_date is None:
+        start_date = end_date - timedelta(days=30)
     # Validate date range
     if start_date >= end_date:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="start_date must be before end_date",
         )
-    
-    today = date.today()
     if end_date > today:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -242,6 +242,30 @@ class InsightsService:
             balance_sheet_prior,
             fetcher
         )
+        # Prefer Trial Balance net profit/loss to derive burn for runway
+        try:
+            if isinstance(trial_balance_pnl, dict):
+                rev = float(trial_balance_pnl.get("revenue") or 0)
+                cogs = float(trial_balance_pnl.get("cost_of_sales") or 0)
+                exp = float(trial_balance_pnl.get("expenses") or 0)
+                net = rev - cogs - exp
+                current_cash = cash_runway.get("current_cash", 0.0)
+                if net >= 0:
+                    cash_spent = 0.0
+                    cash_received = net
+                else:
+                    cash_spent = abs(net)
+                    cash_received = 0.0
+                cash_runway = CashRunwayCalculator.calculate(
+                    cash_position=current_cash,
+                    cash_spent=cash_spent,
+                    cash_received=cash_received,
+                )
+                # mark source
+                cash_runway["confidence_details"] = ["burn_from_trial_balance"]
+        except Exception:
+            # if any issue, retain prior approximation
+            pass
         # Attach a simple runway confidence for MVP UI (High/Medium/Low)
         try:
             runway_months = cash_runway.get("runway_months")
@@ -261,8 +285,17 @@ class InsightsService:
                 details.append("missing_balance_sheet_current")
             if not balance_sheet_prior:
                 details.append("missing_balance_sheet_prior")
-            # Derivation method (we approximate cash flows from BS deltas in MVP)
-            details.append("approx_burn_from_balance_sheet")
+            # Derivation method used for burn
+            if isinstance(trial_balance_pnl, dict):
+                if "burn_from_trial_balance" not in details and (
+                    isinstance(cash_runway.get("confidence_details"), list)
+                ):
+                    # preserve earlier tag if already set
+                    details.extend([d for d in cash_runway.get("confidence_details") if isinstance(d, str)])
+                if "burn_from_trial_balance" not in details:
+                    details.append("burn_from_trial_balance")
+            else:
+                details.append("approx_burn_from_balance_sheet")
             # Basic plausibility check
             if cash_runway.get("current_cash") is None:
                 details.append("cash_extraction_failed")

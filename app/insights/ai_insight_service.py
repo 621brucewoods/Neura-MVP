@@ -130,11 +130,22 @@ class AIInsightService:
                 - ✅ "You may have a cash squeeze in 3-4 weeks unless invoices are collected."
                 - ❌ "Your accounts are unhealthy and at risk."
 
+                Data handling rules:
+                - CALCULATED METRICS are the source of truth - never recalculate or override these numbers
+                - Use RAW DATA SUMMARY only for context and to check consistency
+                - If you spot data issues or inconsistencies:
+                  * Do not modify the calculated metrics
+                  * Lower confidence level appropriately
+                  * Explain the issue in 'data_notes'
+                - If data is missing, provide qualitative guidance and note the gap
+                - Never expose sensitive information like invoice numbers or contact names
+
                 Output requirements:
                 - Generate 1-3 insights ranked by urgency
                 - Each insight must be actionable with concrete next steps
                 - Use severity: high (immediate action), medium (monitor closely), low (awareness)
-                - Use confidence: high (data is complete), medium (some gaps), low (limited data)"""
+                - Use confidence: high (data is complete), medium (some gaps), low (limited data)
+                - Always maintain data integrity and transparency about limitations"""
     
     def _build_prompt(
         self,
@@ -148,10 +159,10 @@ class AIInsightService:
 
                 Analysis Period: {start_date} to {end_date}
 
-                CALCULATED METRICS:
+                CALCULATED METRICS (AUTHORITATIVE):
                 {json.dumps(metrics, indent=2)}
 
-                RAW DATA SUMMARY:
+                RAW DATA SUMMARY (CONTEXT ONLY):
                 {json.dumps(raw_data_summary, indent=2)}
 
 Generate insights that:
@@ -160,7 +171,20 @@ Generate insights that:
 3. Explain why it matters now
 4. Provide 3-5 concrete, actionable next steps
 5. Include relevant supporting numbers (can be empty array if not applicable)
-6. Include data notes only if data quality issues exist (can be empty string)
+6. Include data notes if data quality issues exist or if you detect inconsistencies
+
+Important Instructions:
+- Use 'CALCULATED METRICS' as the source of truth for all numbers shown to the user.
+- Use 'RAW DATA SUMMARY' only for narrative context and consistency checks.
+- If you detect inconsistencies between metrics and raw data, do not modify the metrics. Instead:
+  - Lower the 'confidence_level' (e.g., to 'medium' or 'low')
+  - Add a brief explanation in 'data_notes' (e.g., "Note: Discrepancy detected between metrics and raw data")
+- If a required metric is missing, do not fabricate values. Instead:
+  - Provide qualitative guidance
+  - Lower the 'confidence_level'
+  - Note the missing data in 'data_notes'
+- Skip insights that cannot be supported by the available data
+- Avoid exposing sensitive identifiers (e.g., contact names, invoice numbers) unless absolutely necessary
 
 Return insights as JSON matching the required schema. Rank by urgency (most urgent first).
 All fields are required, but supporting_numbers can be [] and data_notes can be "" if not applicable."""
