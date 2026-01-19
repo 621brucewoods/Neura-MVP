@@ -110,9 +110,17 @@ class XeroService:
             token.id_token = token_data.id_token
         
         await self.db.commit()
-        await self.db.refresh(token)
         
-        return token
+        # Re-query the token to get a fresh instance after commit
+        # This avoids issues with detached instances after commit
+        result = await self.db.execute(
+            select(XeroToken).where(XeroToken.id == token.id)
+        )
+        updated_token = result.scalar_one_or_none()
+        
+        # If query fails (shouldn't happen), return the original token
+        # The attributes are already updated, so this is safe
+        return updated_token if updated_token else token
     
     async def refresh_token_if_needed(
         self, token: XeroToken

@@ -45,23 +45,11 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:password@localhost:5432/cashflow_db"
     
     # ============================================
-    # JWT Authentication
+    # Supabase Authentication
     # ============================================
-    jwt_secret_key: str = "change-this-jwt-secret-in-production"
-    jwt_algorithm: str = "HS256"
-    access_token_expire_minutes: int = 30
-    refresh_token_expire_days: int = 7
-    
-    # ============================================
-    # Account Security
-    # ============================================
-    max_failed_login_attempts: int = 5
-    account_lockout_minutes: int = 30
-    password_min_length: int = 8
-    password_require_uppercase: bool = True
-    password_require_lowercase: bool = True
-    password_require_numbers: bool = True
-    password_require_special: bool = True
+    supabase_url: str = ""
+    supabase_anon_key: str = ""
+    supabase_service_role_key: str = ""
     
     # ============================================
     # Xero API

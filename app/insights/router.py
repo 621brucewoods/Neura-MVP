@@ -27,6 +27,7 @@ from app.integrations.xero.cache_service import CacheService
 from app.integrations.xero.sdk_client import create_xero_sdk_client, XeroSDKClientError
 from app.integrations.xero.data_fetcher import XeroDataFetcher
 from app.insights.insight_generator import InsightGenerator
+from app.insights.health_score_calculator import HealthScoreCalculator
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +205,158 @@ async def get_sync_status(
         "last_sync_error": org.last_sync_error,
         "updated_at": org.updated_at.isoformat() if org.updated_at else None
     }
+
+
+@router.get(
+    "/health-score",
+    summary="Get Business Health Score",
+    description="Calculate and return the Business Health Score (0-100) with detailed breakdown.",
+)
+async def get_health_score(
+    current_user: User = Depends(get_current_user),
+    start_date: Optional[date] = Query(None, description="Start date for P&L period (YYYY-MM-DD). Defaults to 30 days ago."),
+    end_date: Optional[date] = Query(None, description="End date for P&L period (YYYY-MM-DD). Defaults to today."),
+    force_refresh: bool = Query(default=False, description="Force refresh, bypass cache"),
+    db: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
+    """
+    Calculate and return the Business Health Score v1 (0-100).
+    
+    The score is based on:
+    - A) Cash & Runway (30 points)
+    - B) Profitability & Efficiency (25 points)
+    - C) Revenue Quality & Momentum (15 points) - *Requires historical data*
+    - D) Working Capital & Liquidity (20 points)
+    - E) Compliance & Data Confidence (10 points)
+    
+    Uses AccountType-based data extraction for reliability.
+    Missing metrics are handled via weight redistribution.
+    
+    Returns:
+        Complete Health Score result including:
+        - score (0-100)
+        - grade (A/B/C/D)
+        - confidence (high/medium/low)
+        - category breakdowns
+        - top drivers (positive and negative)
+        - all intermediate calculations
+    """
+    if not current_user.organization:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User has no organization",
+        )
+    
+    # Set default dates if not provided
+    today = datetime.now(timezone.utc).date()
+    if end_date is None:
+        end_date = today
+    if start_date is None:
+        start_date = today - timedelta(days=30)
+    
+    # Validate date range
+    if start_date >= end_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="start_date must be before end_date",
+        )
+    
+    if end_date > today:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="end_date cannot be in the future",
+        )
+    
+    try:
+        # Create cache service
+        cache_service = CacheService(db)
+        
+        # Create SDK client
+        sdk_client = await create_xero_sdk_client(
+            organization_id=current_user.organization.id,
+            db=db,
+        )
+        
+        # Create data fetcher
+        data_fetcher = XeroDataFetcher(sdk_client, cache_service=cache_service, db=db)
+        
+        # Fetch all data (includes balance_sheet_totals with new AccountType-based extraction)
+        financial_data = await data_fetcher.fetch_all_data(
+            organization_id=current_user.organization.id,
+            start_date=start_date,
+            end_date=end_date,
+            force_refresh=force_refresh,
+        )
+        
+        # Commit token updates
+        if data_fetcher.session_manager:
+            await data_fetcher.session_manager.commit_all()
+        
+        # Extract data for Health Score calculation
+        balance_sheet_totals = financial_data.get("balance_sheet_totals", {})
+        trial_balance_pnl = financial_data.get("trial_balance_pnl", {})
+        invoices_receivable = financial_data.get("invoices_receivable", {})
+        invoices_payable = financial_data.get("invoices_payable", {})
+        
+        # Calculate Health Score
+        health_score = HealthScoreCalculator.calculate(
+            balance_sheet_totals=balance_sheet_totals,
+            trial_balance_pnl=trial_balance_pnl,
+            invoices_receivable=invoices_receivable,
+            invoices_payable=invoices_payable,
+        )
+        
+        # Add organization and period info
+        xero_tenant_id = None
+        if current_user.organization.xero_token:
+            xero_tenant_id = current_user.organization.xero_token.xero_tenant_id
+        
+        health_score["business"] = {
+            "business_id": str(current_user.organization.id),
+            "business_name": current_user.organization.name or "Unknown",
+            "tenant_provider": "xero",
+            "tenant_id": xero_tenant_id,
+            "currency": "AUD",  # Could be fetched from Xero org settings
+        }
+        health_score["periods"] = {
+            "pnl_monthly": {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "months": 1,  # Currently single month
+            },
+            "rolling_3m": {
+                "end_date": end_date.isoformat(),
+            },
+            "rolling_6m": {
+                "end_date": end_date.isoformat(),
+            },
+            "balance_sheet_asof": end_date.isoformat(),
+        }
+        
+        logger.info(
+            "Health Score calculated for org %s: score=%s, grade=%s, confidence=%s",
+            current_user.organization.id,
+            health_score["scorecard"]["final_score"],
+            health_score["scorecard"]["grade"],
+            health_score["scorecard"]["confidence"],
+        )
+        
+        return health_score
+        
+    except XeroSDKClientError as e:
+        logger.error("Xero SDK error while calculating health score: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to fetch financial data from Xero",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error calculating health score: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to calculate health score",
+        )
 
 
 @router.get(
@@ -414,6 +567,7 @@ async def trigger_insights_generation(
 ):
     """
     Trigger the insights generation process in the background.
+    Updates organization status immediately so frontend can show progress.
     """
     if not current_user.organization:
         raise HTTPException(status_code=400, detail="User has no organization")
@@ -425,11 +579,25 @@ async def trigger_insights_generation(
     if start_date is None:
         start_date = today - timedelta(days=30)
 
+    # Update organization status IMMEDIATELY before starting background task
+    # This ensures the frontend modal shows "Connecting" right away
+    org = current_user.organization
+    org.sync_status = SyncStatus.IN_PROGRESS
+    org.sync_step = SyncStep.CONNECTING
+    org.last_sync_error = None
+    org.updated_at = datetime.now(timezone.utc)  # Explicitly set updated_at to UTC
+    await db.commit()
+    
+    # Refresh to get the latest updated_at timestamp after commit
+    await db.refresh(org)
+
     async def _background_task_wrapper(org_id, start, end, refresh):
         # Create a new session specifically for this background task
         async with async_session_factory() as session:
             try:
                 bg_service = SyncService(session, org_id)
+                # Note: SyncService will update status as it progresses
+                # It starts with CONNECTING, so we don't need to set it again
                 await bg_service.run_sync(start, end, refresh)
             except Exception as e:
                 # Catch any unhandled exceptions to ensure session closes cleanly
@@ -445,7 +613,12 @@ async def trigger_insights_generation(
         force_refresh
     )
     
-    return {"message": "Insight generation started", "status": "IN_PROGRESS"}
-
-
+    # Return status with updated_at timestamp for frontend validation
+    return {
+        "message": "Insight generation started",
+        "status": "IN_PROGRESS",
+        "sync_status": org.sync_status.value,
+        "sync_step": org.sync_step.value if org.sync_step else None,
+        "updated_at": org.updated_at.isoformat() if org.updated_at else None
+    }
 

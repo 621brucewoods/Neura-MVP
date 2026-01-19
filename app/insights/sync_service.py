@@ -71,10 +71,11 @@ class SyncService:
     async def run_sync(self, start_date, end_date, force_refresh: bool = False):
         """
         Main entry point for the background task.
+        Note: Status is already set to IN_PROGRESS/CONNECTING by the trigger endpoint,
+        so we don't need to set it again here.
         """
         try:
-            # 1. Start
-            await self._update_status(SyncStatus.IN_PROGRESS, SyncStep.CONNECTING)
+            # Status already set to CONNECTING by trigger endpoint, so we proceed directly
             
             # 2. Setup Xero Client
             cache_service = CacheService(self.db)

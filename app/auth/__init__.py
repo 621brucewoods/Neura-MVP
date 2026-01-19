@@ -1,43 +1,21 @@
 """
-Authentication Package
-Handles user authentication, JWT tokens, and authorization.
+Authentication Package - Supabase Integration
+Handles user authentication via Supabase and authorization.
 """
 
-from app.auth.dependencies import CurrentUser, get_current_user
-from app.auth.schemas import (
-    LoginRequest,
-    RefreshRequest,
-    SignupRequest,
-    TokenResponse,
-    UserResponse,
-    UserWithOrgResponse,
-)
+from app.auth.dependencies import CurrentUser, get_current_user, get_admin_user, AdminUser
+from app.auth.schemas import UserResponse, UserWithOrgResponse
 from app.auth.service import AuthService
-from app.auth.utils import (
-    create_access_token,
-    create_refresh_token,
-    decode_token,
-    hash_password,
-    verify_password,
-)
 
 __all__ = [
     # Dependencies
     "CurrentUser",
     "get_current_user",
+    "get_admin_user",
+    "AdminUser",
     # Schemas
-    "LoginRequest",
-    "RefreshRequest",
-    "SignupRequest",
-    "TokenResponse",
     "UserResponse",
     "UserWithOrgResponse",
     # Service
     "AuthService",
-    # Utils
-    "create_access_token",
-    "create_refresh_token",
-    "decode_token",
-    "hash_password",
-    "verify_password",
 ]

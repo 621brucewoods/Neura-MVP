@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.integrations.xero.cache_service import CacheService
 from app.integrations.xero.exceptions import XeroDataFetchError
-from app.integrations.xero.parsers import BalanceSheetParser
+from app.integrations.xero.parsers import BalanceSheetParser, BalanceSheetAccountTypeParser
 from app.integrations.xero.rate_limiter import XeroRateLimiter
 from app.integrations.xero.retry_handler import XeroRetryHandler
 from app.integrations.xero.sdk_client import XeroSDKClient
@@ -74,20 +74,50 @@ class XeroDataFetcher:
             cache_service=cache_service,
         )
     
-    def extract_cash_from_balance_sheet(self, balance_sheet: dict[str, Any]) -> Optional[float]:
+    def extract_cash_from_balance_sheet(
+        self, 
+        balance_sheet: dict[str, Any],
+        account_type_map: Optional[dict[str, Any]] = None
+    ) -> Optional[float]:
         """
         Extract cash position from Balance Sheet.
         
-        Looks for "Total Cash and Cash Equivalents" SummaryRow in the Balance Sheet.
-        Uses the first data column (typically index 1).
+        Primary method: Sum all BANK AccountType accounts (reliable, when account_type_map provided).
+        Fallback method: Search for "Total Cash" SummaryRow label (fragile).
         
         Args:
             balance_sheet: Balance Sheet data structure
+            account_type_map: Optional AccountID to AccountInfo mapping for reliable extraction
             
         Returns:
             Cash position as float, or None if not found
         """
-        return BalanceSheetParser.extract_cash(balance_sheet)
+        return BalanceSheetParser.extract_cash(balance_sheet, account_type_map)
+    
+    def extract_balance_sheet_totals(
+        self,
+        balance_sheet: dict[str, Any],
+        account_type_map: dict[str, Any]
+    ) -> dict[str, Optional[float]]:
+        """
+        Extract all Balance Sheet totals by AccountType (reliable method).
+        
+        Returns totals for:
+        - cash: Sum of BANK accounts
+        - accounts_receivable: CURRENT with SystemAccount=DEBTORS
+        - current_assets_total: BANK + all CURRENT
+        - accounts_payable: CURRLIAB with SystemAccount=CREDITORS
+        - current_liabilities_total: Sum of all CURRLIAB
+        - etc.
+        
+        Args:
+            balance_sheet: Balance Sheet data structure
+            account_type_map: AccountID to AccountInfo mapping
+            
+        Returns:
+            Dictionary with all Balance Sheet totals
+        """
+        return BalanceSheetAccountTypeParser.extract_totals(balance_sheet, account_type_map)
     
     async def fetch_all_data(
         self, 

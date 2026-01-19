@@ -16,7 +16,7 @@ from app.integrations.xero.fetchers.balance_sheet import BalanceSheetFetcher
 from app.integrations.xero.fetchers.invoices import InvoicesFetcher
 from app.integrations.xero.fetchers.profit_loss import ProfitLossFetcher
 from app.integrations.xero.fetchers.trial_balance import TrialBalanceFetcher
-from app.integrations.xero.parsers import TrialBalanceParser
+from app.integrations.xero.parsers import TrialBalanceParser, BalanceSheetAccountTypeParser
 from app.integrations.xero.sdk_client import XeroSDKClient
 from app.integrations.xero.session_manager import XeroSessionManager
 
@@ -263,9 +263,23 @@ class XeroDataOrchestrator:
             if errors:
                 logger.warning("Some data fetch operations failed: %s", ", ".join(errors))
             
+            # Extract Balance Sheet totals using reliable AccountType method
+            balance_sheet_totals = {}
+            if accounts_map and balance_sheet_current:
+                balance_sheet_totals = BalanceSheetAccountTypeParser.extract_totals(
+                    balance_sheet_current, accounts_map
+                )
+                logger.info(
+                    "Extracted Balance Sheet totals: cash=%s, current_assets=%s, current_liabilities=%s",
+                    balance_sheet_totals.get("cash"),
+                    balance_sheet_totals.get("current_assets_total"),
+                    balance_sheet_totals.get("current_liabilities_total"),
+                )
+            
             return {
                 "balance_sheet_current": balance_sheet_current,
                 "balance_sheet_prior": balance_sheet_prior,
+                "balance_sheet_totals": balance_sheet_totals,  # NEW: reliable AccountType-based totals
                 "profit_loss": profit_loss,
                 "trial_balance": trial_balance,
                 "account_type_map": accounts_map,

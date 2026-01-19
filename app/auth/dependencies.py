@@ -1,6 +1,6 @@
 """
-Authentication Dependencies
-FastAPI dependencies for route protection.
+Authentication Dependencies - Supabase Integration
+Validates Supabase JWT tokens and returns authenticated users.
 """
 
 from typing import Annotated
@@ -11,7 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.service import AuthService
-from app.auth.utils import decode_token
+from app.auth.supabase_client import supabase
 from app.database import get_async_session
 from app.models import User
 
@@ -24,7 +24,13 @@ async def get_current_user(
     session: Annotated[AsyncSession, Depends(get_async_session)],
 ) -> User:
     """
-    Dependency that validates JWT token and returns current user.
+    Validate Supabase JWT token and return current user.
+    
+    Flow:
+    1. Extract token from Authorization header
+    2. Validate token with Supabase
+    3. Get or create User record in our database
+    4. Return User instance
     
     Usage:
         @app.get("/protected")
@@ -41,54 +47,43 @@ async def get_current_user(
     Raises:
         HTTPException: If token is invalid or user not found
     """
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid or expired token",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    token = credentials.credentials
     
-    payload = decode_token(credentials.credentials)
-    if not payload:
-        raise credentials_exception
-    
-    if payload.get("type") != "access":
-        raise credentials_exception
-    
-    # Check if token is blacklisted
-    auth_service = AuthService(session)
-    jti = payload.get("jti")
-    if jti and await auth_service.is_token_blacklisted(jti):
+    # Validate token with Supabase
+    try:
+        response = supabase.auth.get_user(token)
+        supabase_user = response.user
+        
+        if not supabase_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has been revoked",
+            detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    user_id_str = payload.get("sub")
-    if not user_id_str:
-        raise credentials_exception
+    # Get or create User record in our database
+    # Extract organization_name from user metadata if available
+    organization_name = None
+    if supabase_user.user_metadata:
+        organization_name = supabase_user.user_metadata.get("organization_name")
     
-    try:
-        user_id = UUID(user_id_str)
-    except ValueError:
-        raise credentials_exception
-    
-    user = await auth_service.get_user_by_id(user_id)
-    
-    if not user:
-        raise credentials_exception
+    auth_service = AuthService(session)
+    user = await auth_service.get_or_create_user(
+        supabase_user_id=UUID(supabase_user.id),
+        email=supabase_user.email or "",
+        organization_name=organization_name,
+    )
     
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is deactivated",
-        )
-    
-    # Check if account is locked
-    if user.is_locked():
-        raise HTTPException(
-            status_code=status.HTTP_423_LOCKED,
-            detail="Account is temporarily locked",
         )
     
     return user

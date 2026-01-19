@@ -24,12 +24,16 @@ from app.insights.router import router as insights_router
 from app.feedback.router import router as feedback_router
 from app.settings.router import router as settings_router
 
-# Configure logging
+# Configure logging - INFO by default, DEBUG only for our app code
 logging.basicConfig(
-    level=logging.DEBUG if settings.debug else logging.INFO,
+    level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
+
+# Enable DEBUG only for our application code if debug mode is on
+if settings.debug:
+    logging.getLogger("app").setLevel(logging.DEBUG)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:

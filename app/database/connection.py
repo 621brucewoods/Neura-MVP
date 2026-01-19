@@ -15,8 +15,6 @@ from sqlalchemy.ext.asyncio import (
 from app.config import settings
 from app.database.base import Base
 
-# Disable SQLAlchemy engine query logging
-logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 # Create async engine with connection pooling
 # Use NullPool for serverless/testing, otherwise use default pool

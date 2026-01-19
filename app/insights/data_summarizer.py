@@ -6,8 +6,25 @@ Includes actual data structures with labels, not just metrics.
 Limits depth and removes repetitive parts to keep it compact.
 """
 
-from typing import Any
+from typing import Any, Union, Optional
 from datetime import date
+
+
+def _get_account_type_from_map(account_type_map: dict[str, Any], account_id: str) -> Optional[str]:
+    """
+    Get AccountType from account_type_map, supporting both old and new structures.
+    
+    Old structure: {"uuid": "REVENUE"}
+    New structure: {"uuid": {"type": "REVENUE", "system_account": None}}
+    """
+    info = account_type_map.get(account_id)
+    if info is None:
+        return None
+    if isinstance(info, str):
+        return info  # Old structure
+    if isinstance(info, dict):
+        return info.get("type")  # New structure
+    return None
 
 
 class DataSummarizer:
@@ -124,7 +141,8 @@ class DataSummarizer:
                     continue
 
                 seen_ids.add(account_id)
-                account_type = account_type_map.get(account_id)
+                # Use helper function to support both old and new structures
+                account_type = _get_account_type_from_map(account_type_map, account_id)
                 label = first_cell.get("Value", first_cell.get("value", ""))
 
                 value_cell = cells[1] if len(cells) > 1 else {}
@@ -163,12 +181,29 @@ class DataSummarizer:
         Includes actual data structures with labels, not just metrics.
         Limits depth and size to keep it compact.
         """
-        # Extract cash positions
+        # Account type map (needed for reliable extraction)
+        account_type_map = financial_data.get("account_type_map", {})
+        
+        # Extract cash positions - use account_type_map for reliable extraction
         balance_sheet_current = financial_data.get("balance_sheet_current", {})
         balance_sheet_prior = financial_data.get("balance_sheet_prior", {})
         
-        cash_current = fetcher.extract_cash_from_balance_sheet(balance_sheet_current)
-        cash_prior = fetcher.extract_cash_from_balance_sheet(balance_sheet_prior)
+        # Use balance_sheet_totals if available (already extracted reliably by orchestrator)
+        balance_sheet_totals = financial_data.get("balance_sheet_totals", {})
+        if balance_sheet_totals and "cash" in balance_sheet_totals:
+            cash_current = balance_sheet_totals.get("cash")
+        else:
+            # Fallback to fetcher with account_type_map for reliable extraction
+            cash_current = fetcher.extract_cash_from_balance_sheet(
+                balance_sheet_current, 
+                account_type_map=account_type_map if account_type_map else None
+            )
+        
+        # Prior period - still need to extract (no pre-computed totals for prior)
+        cash_prior = fetcher.extract_cash_from_balance_sheet(
+            balance_sheet_prior,
+            account_type_map=account_type_map if account_type_map else None
+        )
         
         # Trial Balance P&L (already extracted)
         trial_balance_pnl = financial_data.get("trial_balance_pnl", {})
@@ -176,9 +211,6 @@ class DataSummarizer:
         # Invoices (already calculated, include all)
         receivables = financial_data.get("invoices_receivable", {})
         payables = financial_data.get("invoices_payable", {})
-        
-        # Account type map
-        account_type_map = financial_data.get("account_type_map", {})
         
         # Profit & Loss report structure
         profit_loss = financial_data.get("profit_loss", {})
@@ -222,10 +254,52 @@ class DataSummarizer:
                 "invoices": payables.get("invoices", []),  # All invoices with details
             },
             "accounts": DataSummarizer._extract_accounts_from_trial_balance(trial_balance, account_type_map),
-            "account_types": {
-                "total": len(account_type_map),
-                "revenue": sum(1 for at in account_type_map.values() if at and at.upper() == "REVENUE"),
-                "expense": sum(1 for at in account_type_map.values() if at and at.upper() == "EXPENSE"),
-                "cogs": sum(1 for at in account_type_map.values() if at and at.upper() == "COGS"),
-            },
+            "account_types": DataSummarizer._count_account_types(account_type_map),
         }
+    
+    @staticmethod
+    def _count_account_types(account_type_map: dict[str, Any]) -> dict[str, int]:
+        """
+        Count accounts by type, supporting both old and new structures.
+        
+        Old structure: {"uuid": "REVENUE"}
+        New structure: {"uuid": {"type": "REVENUE", "system_account": None}}
+        """
+        counts = {
+            "total": len(account_type_map),
+            "revenue": 0,
+            "expense": 0,
+            "cogs": 0,
+            "bank": 0,
+            "current": 0,
+            "currliab": 0,
+        }
+        
+        for account_id, info in account_type_map.items():
+            # Get type from either structure
+            if isinstance(info, str):
+                account_type = info
+            elif isinstance(info, dict):
+                account_type = info.get("type", "")
+            else:
+                continue
+            
+            if not account_type:
+                continue
+            
+            account_type_upper = account_type.upper()
+            
+            if account_type_upper == "REVENUE":
+                counts["revenue"] += 1
+            elif account_type_upper == "EXPENSE":
+                counts["expense"] += 1
+            elif account_type_upper in ("COGS", "DIRECTCOSTS"):
+                counts["cogs"] += 1
+            elif account_type_upper == "BANK":
+                counts["bank"] += 1
+            elif account_type_upper == "CURRENT":
+                counts["current"] += 1
+            elif account_type_upper == "CURRLIAB":
+                counts["currliab"] += 1
+        
+        return counts

@@ -1,13 +1,14 @@
 """
-User Model
-Represents authenticated users in the system.
+User Model - Supabase Auth Integration
+Links Supabase auth.users to application user records.
 """
 
-import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
+from uuid import UUID
 
-from sqlalchemy import String, Boolean, Index, Integer, DateTime, Enum
+from sqlalchemy import String, Boolean, Index, Enum
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from enum import Enum as PyEnum
 
@@ -26,37 +27,39 @@ class UserRole(str, PyEnum):
 
 class User(Base, UUIDMixin, TimestampMixin):
     """
-    User model for authentication and identity.
+    User model linked to Supabase auth.users.
+    
+    This model represents application users in our database.
+    Authentication is handled entirely by Supabase.
+    We only store business logic data here.
     
     Attributes:
-        id: Unique identifier (UUID)
-        email: User's email address (unique, used for login)
-        password_hash: Bcrypt hashed password
-        is_active: Whether the user account is active
-        is_verified: Whether email has been verified
-        organization: Related organization (1:1 relationship)
-        created_at: Timestamp of creation
-        updated_at: Timestamp of last update
-    
-    Relationships:
-        - One User has One Organization (1:1)
-    
-    Indexes:
-        - email (unique)
-        - is_active (for filtering active users)
+        id: Application user ID (UUID)
+        supabase_user_id: Supabase auth.users.id (links to Supabase)
+        email: User email (synced from Supabase)
+        is_active: Account active status
+        role: User role (user or admin)
+        organization: Related organization (1:1)
     """
     
-    # Core fields
+    # Supabase link (required, unique, indexed)
+    # Note: nullable=True temporarily for migration compatibility
+    # Should be nullable=False after all users are migrated to Supabase
+    supabase_user_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        unique=True,
+        nullable=True,  # Temporarily nullable for migration
+        index=True,
+        comment="Supabase auth.users.id - links to Supabase authentication"
+    )
+    
+    # Email (synced from Supabase, but stored for quick access)
     email: Mapped[str] = mapped_column(
         String(255),
         unique=True,
         nullable=False,
         index=True,
-    )
-    
-    password_hash: Mapped[str] = mapped_column(
-        String(255),
-        nullable=False,
+        comment="User email (synced from Supabase auth.users)"
     )
     
     # Account status
@@ -64,41 +67,16 @@ class User(Base, UUIDMixin, TimestampMixin):
         Boolean,
         default=True,
         nullable=False,
+        index=True,
+        comment="Whether the user account is active"
     )
     
-    is_verified: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        nullable=False,
-    )
-    
-    # Role
+    # Role (business logic)
     role: Mapped[UserRole] = mapped_column(
         Enum(UserRole, name="user_role_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         default=UserRole.USER,
         nullable=False,
-        comment="User role: user or admin",
-    )
-    
-    # Account lockout fields
-    failed_login_attempts: Mapped[int] = mapped_column(
-        Integer,
-        default=0,
-        nullable=False,
-        comment="Number of consecutive failed login attempts",
-    )
-    
-    locked_until: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-        index=True,
-        comment="Account locked until this timestamp (null if not locked)",
-    )
-    
-    last_login_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-        comment="Last successful login timestamp",
+        comment="User role: user or admin"
     )
     
     # Relationships
@@ -117,21 +95,18 @@ class User(Base, UUIDMixin, TimestampMixin):
         cascade="all, delete-orphan",
     )
     
-    # Table configuration
+    # Indexes
     __table_args__ = (
+        Index("ix_users_supabase_id", "supabase_user_id"),
         Index("ix_users_email_active", "email", "is_active"),
     )
-    
-    def is_locked(self) -> bool:
-        """Check if account is currently locked."""
-        if not self.locked_until:
-            return False
-        return datetime.now(timezone.utc) < self.locked_until
     
     def is_admin(self) -> bool:
         """Check if user has admin role."""
         return self.role == UserRole.ADMIN
     
     def __repr__(self) -> str:
-        return f"<User(id={self.id}, email={self.email!r}, is_active={self.is_active}, role={self.role.value})>"
-
+        return (
+            f"<User(id={self.id}, email={self.email!r}, "
+            f"is_active={self.is_active}, role={self.role.value})>"
+        )

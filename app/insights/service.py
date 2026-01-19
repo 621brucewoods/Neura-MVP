@@ -29,18 +29,23 @@ class InsightsService:
     """
     
     @staticmethod
-    def _extract_cash_from_balance_sheet(balance_sheet: dict[str, Any], fetcher: XeroDataFetcher) -> float:
+    def _extract_cash_from_balance_sheet(
+        balance_sheet: dict[str, Any], 
+        fetcher: XeroDataFetcher,
+        account_type_map: Optional[dict[str, Any]] = None
+    ) -> float:
         """
         Extract cash position from Balance Sheet.
         
         Args:
             balance_sheet: Balance Sheet data
             fetcher: XeroDataFetcher instance with extraction method
+            account_type_map: Optional account ID to type mapping for reliable extraction
         
         Returns:
             Cash position as float (defaults to 0.0 if not found)
         """
-        cash = fetcher.extract_cash_from_balance_sheet(balance_sheet)
+        cash = fetcher.extract_cash_from_balance_sheet(balance_sheet, account_type_map=account_type_map)
         return float(cash) if cash is not None else 0.0
     
     @staticmethod
@@ -232,15 +237,36 @@ class InsightsService:
         """
         balance_sheet_current = financial_data.get("balance_sheet_current", {})
         balance_sheet_prior = financial_data.get("balance_sheet_prior", {})
+        balance_sheet_totals = financial_data.get("balance_sheet_totals", {})
+        account_type_map = financial_data.get("account_type_map", {})
         receivables = financial_data.get("invoices_receivable", {})
         payables = financial_data.get("invoices_payable", {})
         profit_loss = financial_data.get("profit_loss")
         trial_balance_pnl = financial_data.get("trial_balance_pnl")
         
-        cash_runway = InsightsService.calculate_cash_runway(
-            balance_sheet_current,
-            balance_sheet_prior,
-            fetcher
+        # Get cash from reliable balance_sheet_totals if available
+        # Otherwise fallback to extraction with account_type_map
+        if balance_sheet_totals and "cash" in balance_sheet_totals:
+            cash_current = balance_sheet_totals.get("cash", 0.0)
+        else:
+            cash_current = InsightsService._extract_cash_from_balance_sheet(
+                balance_sheet_current, fetcher, account_type_map
+            )
+        
+        # Prior period needs extraction (no pre-computed totals)
+        cash_prior = InsightsService._extract_cash_from_balance_sheet(
+            balance_sheet_prior, fetcher, account_type_map
+        )
+        
+        # Calculate net cash change and derive burn
+        net_cash_change = cash_current - cash_prior
+        cash_received = max(0.0, net_cash_change)
+        cash_spent = abs(min(0.0, net_cash_change))
+        
+        cash_runway = CashRunwayCalculator.calculate(
+            cash_position=cash_current,
+            cash_spent=cash_spent,
+            cash_received=cash_received,
         )
         # Prefer Trial Balance net profit/loss to derive burn for runway
         try:
@@ -305,12 +331,20 @@ class InsightsService:
             cash_runway["confidence_level"] = "Medium"
             cash_runway["confidence_details"] = ["confidence_estimation_error"]
         
-        leading_indicators = InsightsService.calculate_leading_indicators(
-            receivables,
-            payables,
-            balance_sheet_current,
-            balance_sheet_prior,
-            fetcher
+        # Calculate leading indicators using pre-extracted cash values
+        from datetime import date as date_type
+        executive_summary_for_indicators = {
+            "cash_position": cash_current,
+            "cash_spent": cash_spent,
+            "cash_received": cash_received,
+            "report_date": date_type.today(),
+        }
+        
+        leading_indicators = LeadingIndicatorsCalculator.calculate(
+            receivables=receivables,
+            payables=payables,
+            executive_summary_current=executive_summary_for_indicators,
+            executive_summary_history=[],
         )
         
         cash_pressure = InsightsService.calculate_cash_pressure(
@@ -328,18 +362,25 @@ class InsightsService:
         except Exception:
             pass
         
-        profitability = InsightsService.calculate_profitability(
-            profit_loss,
-            balance_sheet_current,
-            balance_sheet_prior,
-            fetcher,
-            trial_balance_pnl=trial_balance_pnl
+        # Calculate profitability using pre-extracted cash values
+        executive_summary_for_profit = {
+            "cash_position": cash_current,
+            "cash_spent": cash_spent,
+            "cash_received": cash_received,
+            "report_date": date_type.today(),
+        }
+        
+        profitability = ProfitabilityCalculator.calculate(
+            profit_loss_data=profit_loss,
+            trial_balance_pnl=trial_balance_pnl,
+            executive_summary_current=executive_summary_for_profit,
+            executive_summary_history=[],
         )
         
-        upcoming_commitments = InsightsService.calculate_upcoming_commitments(
-            payables,
-            balance_sheet_current,
-            fetcher
+        # Calculate upcoming commitments using pre-extracted cash position
+        upcoming_commitments = UpcomingCommitmentsCalculator.calculate(
+            payables=payables,
+            cash_position=cash_current,
         )
         
         return {

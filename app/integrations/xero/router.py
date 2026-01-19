@@ -4,6 +4,7 @@ API endpoints for Xero OAuth 2.0 flow and data fetching.
 """
 
 from datetime import date, timedelta
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
@@ -109,10 +110,9 @@ async def xero_callback(
     organization_id = oauth_state_store.consume_state(state)
     
     if not organization_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired state token. Please restart the connection flow.",
-        )
+        error_message = "Invalid or expired connection request. Please try connecting again."
+        redirect_url = f"{settings.frontend_app_url}/settings?error={quote(error_message)}"
+        return RedirectResponse(url=redirect_url, status_code=302)
     
     # Get organization from database
     result = await db.execute(
@@ -121,10 +121,9 @@ async def xero_callback(
     organization = result.scalar_one_or_none()
     
     if not organization:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Organization not found",
-        )
+        error_message = "Organization not found. Please contact support."
+        redirect_url = f"{settings.frontend_app_url}/settings?error={quote(error_message)}"
+        return RedirectResponse(url=redirect_url, status_code=302)
     
     xero_service = XeroService(db)
     
@@ -136,10 +135,9 @@ async def xero_callback(
         connections = await xero_oauth.get_connections(token_response["access_token"])
         
         if not connections:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No Xero organizations authorized",
-            )
+            error_message = "No Xero organizations authorized. Please authorize at least one organization in Xero."
+            redirect_url = f"{settings.frontend_app_url}/settings?error={quote(error_message)}"
+            return RedirectResponse(url=redirect_url, status_code=302)
         
         # Use first connection (user can have multiple orgs in Xero)
         # For MVP, we support one Xero org per user org
@@ -154,13 +152,25 @@ async def xero_callback(
             xero_tenant_id=xero_tenant_id,
         )
         
-        # Minimal change: redirect back to frontend after successful connect
-        redirect_url = f"{settings.frontend_app_url}/integrations/xero/connected?result=success"
+        # Redirect to settings page after successful connect
+        redirect_url = f"{settings.frontend_app_url}/settings"
         return RedirectResponse(url=redirect_url, status_code=302)
         
-    except XeroOAuthError:
-        # Global exception handler will sanitize this
-        raise
+    except XeroOAuthError as e:
+        # Redirect to frontend with error message
+        error_message = str(e) if str(e) else "Failed to connect to Xero. Please try again."
+        redirect_url = f"{settings.frontend_app_url}/settings?error={quote(error_message)}"
+        return RedirectResponse(url=redirect_url, status_code=302)
+    except HTTPException as e:
+        # Redirect to frontend with error message
+        error_message = e.detail if e.detail else "An error occurred while connecting to Xero."
+        redirect_url = f"{settings.frontend_app_url}/settings?error={quote(error_message)}"
+        return RedirectResponse(url=redirect_url, status_code=302)
+    except Exception as e:
+        # Catch any other unexpected errors
+        error_message = "An unexpected error occurred while connecting to Xero. Please try again."
+        redirect_url = f"{settings.frontend_app_url}/settings?error={quote(error_message)}"
+        return RedirectResponse(url=redirect_url, status_code=302)
 
 
 @router.get(
