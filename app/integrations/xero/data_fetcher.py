@@ -2,8 +2,7 @@
 Xero Data Fetcher
 Facade for fetching financial data from Xero API.
 
-This module provides a backward-compatible interface while delegating
-to specialized modules for actual implementation.
+Delegates to the Orchestrator for data fetching and Extractors for data extraction.
 """
 
 import logging
@@ -14,8 +13,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.integrations.xero.cache_service import CacheService
-from app.integrations.xero.exceptions import XeroDataFetchError
-from app.integrations.xero.parsers import BalanceSheetParser, BalanceSheetAccountTypeParser
+from app.integrations.xero.extractors import Extractors
 from app.integrations.xero.rate_limiter import XeroRateLimiter
 from app.integrations.xero.retry_handler import XeroRetryHandler
 from app.integrations.xero.sdk_client import XeroSDKClient
@@ -80,19 +78,21 @@ class XeroDataFetcher:
         account_type_map: Optional[dict[str, Any]] = None
     ) -> Optional[float]:
         """
-        Extract cash position from Balance Sheet.
-        
-        Primary method: Sum all BANK AccountType accounts (reliable, when account_type_map provided).
-        Fallback method: Search for "Total Cash" SummaryRow label (fragile).
+        Extract cash position from Balance Sheet using Extractors module.
         
         Args:
             balance_sheet: Balance Sheet data structure
-            account_type_map: Optional AccountID to AccountInfo mapping for reliable extraction
+            account_type_map: AccountID to AccountInfo mapping for extraction
             
         Returns:
             Cash position as float, or None if not found
         """
-        return BalanceSheetParser.extract_cash(balance_sheet, account_type_map)
+        if not account_type_map:
+            logger.warning("No account_type_map provided for cash extraction")
+            return None
+        
+        bs_data = Extractors.extract_balance_sheet(balance_sheet, account_type_map)
+        return bs_data.get("cash")
     
     def extract_balance_sheet_totals(
         self,
@@ -100,15 +100,7 @@ class XeroDataFetcher:
         account_type_map: dict[str, Any]
     ) -> dict[str, Optional[float]]:
         """
-        Extract all Balance Sheet totals by AccountType (reliable method).
-        
-        Returns totals for:
-        - cash: Sum of BANK accounts
-        - accounts_receivable: CURRENT with SystemAccount=DEBTORS
-        - current_assets_total: BANK + all CURRENT
-        - accounts_payable: CURRLIAB with SystemAccount=CREDITORS
-        - current_liabilities_total: Sum of all CURRLIAB
-        - etc.
+        Extract all Balance Sheet totals using Extractors module.
         
         Args:
             balance_sheet: Balance Sheet data structure
@@ -117,7 +109,7 @@ class XeroDataFetcher:
         Returns:
             Dictionary with all Balance Sheet totals
         """
-        return BalanceSheetAccountTypeParser.extract_totals(balance_sheet, account_type_map)
+        return Extractors.extract_balance_sheet(balance_sheet, account_type_map)
     
     async def fetch_all_data(
         self, 

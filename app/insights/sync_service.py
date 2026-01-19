@@ -101,7 +101,7 @@ class SyncService:
 
             # 4. Calculate Metrics
             await self._update_status(SyncStatus.IN_PROGRESS, SyncStep.CALCULATING)
-            metrics = InsightsService.calculate_all_insights(financial_data, data_fetcher)
+            metrics = InsightsService.calculate_all_insights(financial_data)
             raw_data_summary = DataSummarizer.summarize(financial_data, start_date, end_date, data_fetcher)
 
             # Persist Metrics Snapshot

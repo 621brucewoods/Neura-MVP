@@ -1,6 +1,8 @@
 """
 Xero Data Orchestrator
 Coordinates parallel fetching of all Xero financial data.
+
+Uses the new Extractors module for all data extraction (single source of truth).
 """
 
 import asyncio
@@ -11,12 +13,12 @@ from uuid import UUID
 
 from app.integrations.xero.cache_service import CacheService
 from app.integrations.xero.exceptions import XeroDataFetchError
+from app.integrations.xero.extractors import Extractors
 from app.integrations.xero.fetchers.accounts import AccountsFetcher
 from app.integrations.xero.fetchers.balance_sheet import BalanceSheetFetcher
 from app.integrations.xero.fetchers.invoices import InvoicesFetcher
 from app.integrations.xero.fetchers.profit_loss import ProfitLossFetcher
 from app.integrations.xero.fetchers.trial_balance import TrialBalanceFetcher
-from app.integrations.xero.parsers import TrialBalanceParser, BalanceSheetAccountTypeParser
 from app.integrations.xero.sdk_client import XeroSDKClient
 from app.integrations.xero.session_manager import XeroSessionManager
 
@@ -126,25 +128,15 @@ class XeroDataOrchestrator:
     async def _fetch_trial_balance_with_error_handling(
         self,
         end_date: date,
-        accounts_map: dict[str, str],
-    ) -> tuple[dict[str, Any], dict[str, Any], Optional[str]]:
-        """Fetch trial balance and extract P&L with error handling."""
+    ) -> tuple[dict[str, Any], Optional[str]]:
+        """Fetch trial balance with error handling (extraction done later)."""
         try:
             trial_balance = await self.trial_balance_fetcher.fetch(end_date)
-            
-            if accounts_map:
-                trial_balance_pnl = TrialBalanceParser.extract_pnl(
-                    trial_balance, accounts_map
-                )
-            else:
-                logger.warning("Cannot extract Trial Balance P&L: account_type_map is empty")
-                trial_balance_pnl = {}
-            
-            return trial_balance, trial_balance_pnl, None
+            return trial_balance, None
         except XeroDataFetchError as e:
             error_msg = f"Trial Balance: {e.message}"
             logger.warning(error_msg)
-            return {}, {}, error_msg
+            return {}, error_msg
     
     async def _fetch_receivables_with_error_handling(
         self,
@@ -244,11 +236,11 @@ class XeroDataOrchestrator:
             
             # Group 2: Fetch dependent data in parallel (after Accounts is available)
             (
-                (trial_balance, trial_balance_pnl, error_trial),
-                (receivables, error_receivables),
-                (payables, error_payables),
+                (trial_balance, error_trial),
+                (receivables_raw, error_receivables),
+                (payables_raw, error_payables),
             ) = await asyncio.gather(
-                self._fetch_trial_balance_with_error_handling(end_date, accounts_map),
+                self._fetch_trial_balance_with_error_handling(end_date),
                 self._fetch_receivables_with_error_handling(),
                 self._fetch_payables_with_error_handling(),
             )
@@ -263,29 +255,57 @@ class XeroDataOrchestrator:
             if errors:
                 logger.warning("Some data fetch operations failed: %s", ", ".join(errors))
             
-            # Extract Balance Sheet totals using reliable AccountType method
-            balance_sheet_totals = {}
-            if accounts_map and balance_sheet_current:
-                balance_sheet_totals = BalanceSheetAccountTypeParser.extract_totals(
-                    balance_sheet_current, accounts_map
-                )
-                logger.info(
-                    "Extracted Balance Sheet totals: cash=%s, current_assets=%s, current_liabilities=%s",
-                    balance_sheet_totals.get("cash"),
-                    balance_sheet_totals.get("current_assets_total"),
-                    balance_sheet_totals.get("current_liabilities_total"),
-                )
+            # =================================================================
+            # EXTRACTION: Use new Extractors module (single source of truth)
+            # =================================================================
             
+            # Extract all data using the clean extraction layer
+            extracted = Extractors.extract_all(
+                balance_sheet_raw=balance_sheet_current,
+                trial_balance_raw=trial_balance,
+                invoices_receivable=receivables_raw,
+                invoices_payable=payables_raw,
+                account_map=accounts_map,
+                organization_id=str(organization_id) if organization_id else None,
+                period_start=start_date.isoformat() if start_date else None,
+                period_end=end_date.isoformat() if end_date else None,
+            )
+            
+            # Log extraction summary
+            bs = extracted["balance_sheet"]
+            pnl = extracted["pnl"]
+            logger.info(
+                "Extraction complete: cash=%.2f, AR=%.2f, AP=%.2f, revenue=%.2f, expenses=%.2f",
+                bs.get("cash") or 0,
+                bs.get("accounts_receivable") or 0,
+                bs.get("accounts_payable") or 0,
+                pnl.get("revenue") or 0,
+                pnl.get("expenses") or 0,
+            )
+            
+            # Return both raw data (for backward compatibility) and extracted data
             return {
+                # Raw data (for any legacy code that needs it)
                 "balance_sheet_current": balance_sheet_current,
                 "balance_sheet_prior": balance_sheet_prior,
-                "balance_sheet_totals": balance_sheet_totals,  # NEW: reliable AccountType-based totals
                 "profit_loss": profit_loss,
                 "trial_balance": trial_balance,
                 "account_type_map": accounts_map,
-                "trial_balance_pnl": trial_balance_pnl,
-                "invoices_receivable": receivables,
-                "invoices_payable": payables,
+                "invoices_receivable": receivables_raw,
+                "invoices_payable": payables_raw,
+                
+                # NEW: Clean extracted data (use this!)
+                "extracted": extracted,
+                
+                # Backward compatible aliases (will be deprecated)
+                "balance_sheet_totals": extracted["balance_sheet"],
+                "trial_balance_pnl": {
+                    "revenue": pnl.get("revenue"),
+                    "cost_of_sales": pnl.get("cost_of_sales"),
+                    "expenses": pnl.get("expenses"),
+                },
+                
+                # Metadata
                 "fetched_at": datetime.now(timezone.utc).isoformat(),
                 "errors": errors if errors else None,
             }

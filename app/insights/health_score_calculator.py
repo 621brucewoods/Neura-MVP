@@ -9,6 +9,7 @@ Calculates a comprehensive Business Health Score (0-100) based on:
 - E) Compliance & Data Confidence (10 points)
 
 Uses AccountType-based data extraction for reliability across all organizations.
+Integrates with the Extractors module for clean, typed data structures.
 """
 
 import logging
@@ -16,7 +17,10 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.integrations.xero.extracted_types import FinancialData
 
 logger = logging.getLogger(__name__)
 
@@ -873,3 +877,59 @@ class HealthScoreCalculator:
                 "ap_over_60_pct": ap_over_60_pct,
             },
         }
+    
+    @staticmethod
+    def calculate_from_extracted(
+        extracted_data: "FinancialData",
+    ) -> dict[str, Any]:
+        """
+        Calculate Business Health Score from Extractors module output.
+        
+        This is a convenience method that accepts the typed FinancialData
+        structure from the Extractors module.
+        
+        Args:
+            extracted_data: FinancialData from Extractors.extract_all()
+        
+        Returns:
+            Complete Health Score result
+        """
+        balance_sheet = extracted_data.get("balance_sheet", {})
+        pnl = extracted_data.get("pnl", {})
+        ar_ageing = extracted_data.get("ar_ageing", {})
+        ap_ageing = extracted_data.get("ap_ageing", {})
+        
+        # Convert to expected format
+        balance_sheet_totals = {
+            "cash": balance_sheet.get("cash"),
+            "accounts_receivable": balance_sheet.get("accounts_receivable"),
+            "current_assets_total": balance_sheet.get("current_assets_total"),
+            "current_liabilities_total": balance_sheet.get("current_liabilities_total"),
+            "accounts_payable": balance_sheet.get("accounts_payable"),
+            "inventory": balance_sheet.get("inventory"),
+        }
+        
+        trial_balance_pnl = {
+            "revenue": pnl.get("revenue"),
+            "cost_of_sales": pnl.get("cost_of_sales"),
+            "expenses": pnl.get("expenses"),
+        }
+        
+        # Convert ageing to invoices format expected by calculate()
+        # The ageing data already has totals and buckets
+        invoices_receivable = {
+            "total": ar_ageing.get("total", 0),
+            "invoices": [],  # Individual invoices not available from ageing summary
+        }
+        
+        invoices_payable = {
+            "total": ap_ageing.get("total", 0),
+            "invoices": [],
+        }
+        
+        return HealthScoreCalculator.calculate(
+            balance_sheet_totals=balance_sheet_totals,
+            trial_balance_pnl=trial_balance_pnl,
+            invoices_receivable=invoices_receivable,
+            invoices_payable=invoices_payable,
+        )

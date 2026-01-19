@@ -280,7 +280,7 @@ async def get_health_score(
         # Create data fetcher
         data_fetcher = XeroDataFetcher(sdk_client, cache_service=cache_service, db=db)
         
-        # Fetch all data (includes balance_sheet_totals with new AccountType-based extraction)
+        # Fetch all data (includes extracted data from new Extractors module)
         financial_data = await data_fetcher.fetch_all_data(
             organization_id=current_user.organization.id,
             start_date=start_date,
@@ -292,11 +292,31 @@ async def get_health_score(
         if data_fetcher.session_manager:
             await data_fetcher.session_manager.commit_all()
         
-        # Extract data for Health Score calculation
-        balance_sheet_totals = financial_data.get("balance_sheet_totals", {})
-        trial_balance_pnl = financial_data.get("trial_balance_pnl", {})
-        invoices_receivable = financial_data.get("invoices_receivable", {})
-        invoices_payable = financial_data.get("invoices_payable", {})
+        # Use new extracted data if available (from Extractors module)
+        extracted = financial_data.get("extracted")
+        if extracted:
+            # Use clean extracted data
+            balance_sheet_totals = extracted.get("balance_sheet", {})
+            pnl_data = extracted.get("pnl", {})
+            trial_balance_pnl = {
+                "revenue": pnl_data.get("revenue"),
+                "cost_of_sales": pnl_data.get("cost_of_sales"),
+                "expenses": pnl_data.get("expenses"),
+            }
+            invoices_receivable = financial_data.get("invoices_receivable", {})
+            invoices_payable = financial_data.get("invoices_payable", {})
+            logger.debug(
+                "Health Score using extracted data: cash=%.2f, AR=%.2f, revenue=%.2f",
+                balance_sheet_totals.get("cash") or 0,
+                balance_sheet_totals.get("accounts_receivable") or 0,
+                trial_balance_pnl.get("revenue") or 0,
+            )
+        else:
+            # Fallback to old structure
+            balance_sheet_totals = financial_data.get("balance_sheet_totals", {})
+            trial_balance_pnl = financial_data.get("trial_balance_pnl", {})
+            invoices_receivable = financial_data.get("invoices_receivable", {})
+            invoices_payable = financial_data.get("invoices_payable", {})
         
         # Calculate Health Score
         health_score = HealthScoreCalculator.calculate(
@@ -431,7 +451,7 @@ async def get_insight_detail(
             await data_fetcher.session_manager.commit_all()
         
         # Calculate metrics
-        metrics = InsightsService.calculate_all_insights(financial_data, data_fetcher)
+        metrics = InsightsService.calculate_all_insights(financial_data)
         
         # Create compact summary of raw data for AI analysis
         raw_data_summary = DataSummarizer.summarize(financial_data, start_date, end_date, data_fetcher)
