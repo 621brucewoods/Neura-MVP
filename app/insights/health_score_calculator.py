@@ -797,9 +797,12 @@ class HealthScoreCalculator:
         
         # =====================
         # CATEGORY E: Compliance & Data Confidence (10 points)
+        # E1 and E2 data not available via standard Xero API
+        # Redistribute their points to E3 (Reporting Readiness)
         # =====================
         
-        # E1: Bank reconciliation freshness (4 pts) - MISSING
+        # E1: Bank reconciliation freshness (4 pts) - NOT AVAILABLE
+        # Xero doesn't expose reconciliation status via standard API
         sub_scores["E1"] = SubScore(
             metric_id="E1",
             name="Bank Reconciliation Freshness",
@@ -811,7 +814,8 @@ class HealthScoreCalculator:
             inputs_used=[]
         )
         
-        # E2: Categorisation completeness (3 pts) - MISSING
+        # E2: Categorisation completeness (3 pts) - NOT AVAILABLE
+        # Xero doesn't expose uncategorised transaction counts via standard API
         sub_scores["E2"] = SubScore(
             metric_id="E2",
             name="Categorisation Completeness",
@@ -823,27 +827,55 @@ class HealthScoreCalculator:
             inputs_used=[]
         )
         
-        # E3: Reporting readiness (3 pts)
-        e3_points = 0
-        if trial_balance_pnl.get("revenue") is not None:
-            e3_points += 1  # P&L available
-        if balance_sheet_totals.get("cash") is not None:
-            e3_points += 1  # Balance Sheet available
-        if ar_invoices or invoices_receivable.get("total", 0) > 0:
-            e3_points += 1  # AR available
+        # E3: Reporting readiness - expanded to absorb E1/E2 points (10 pts total)
+        # Check what data we have available:
+        e3_checks = {
+            "pnl_available": trial_balance_pnl.get("revenue") is not None or trial_balance_pnl.get("expenses") is not None,
+            "balance_sheet_available": balance_sheet_totals.get("cash") is not None,
+            "ar_available": bool(ar_invoices) or invoices_receivable.get("total", 0) > 0,
+            "ap_available": bool(ap_invoices) or invoices_payable.get("total", 0) > 0,
+            "historical_pnl_available": has_monthly_data,  # 3+ months of historical data
+        }
+        
+        # Score based on data availability (10 points total after redistribution)
+        e3_base_points = 0
+        if e3_checks["pnl_available"]:
+            e3_base_points += 2  # P&L data available
+        if e3_checks["balance_sheet_available"]:
+            e3_base_points += 2  # Balance Sheet available
+        if e3_checks["ar_available"]:
+            e3_base_points += 2  # AR data available
+        if e3_checks["ap_available"]:
+            e3_base_points += 2  # AP data available
+        if e3_checks["historical_pnl_available"]:
+            e3_base_points += 2  # Historical P&L for trend analysis
         
         sub_scores["E3"] = SubScore(
             metric_id="E3",
             name="Reporting Readiness",
-            max_points=3,
-            points_awarded=e3_points,
+            max_points=10,  # Absorbs E1 (4) + E2 (3) + original E3 (3) = 10
+            points_awarded=e3_base_points,
             status=MetricStatus.OK,
-            value=e3_points,
-            formula="P&L + BS + AR/AP availability",
-            inputs_used=["trial_balance_pnl", "balance_sheet_totals", "invoices_receivable"]
+            value=e3_base_points,
+            formula="Data availability: P&L + BS + AR + AP + Historical",
+            inputs_used=["trial_balance_pnl", "balance_sheet_totals", "invoices_receivable", "invoices_payable", "monthly_pnl_data"]
         )
         
-        category_e_points = e3_points  # Only E3 is available
+        # Add missing data adjustments for E1 and E2
+        missing_adjustments.append({
+            "metric_id": "E1",
+            "reason": "Bank reconciliation data not available via Xero API",
+            "points_redistributed": 4,
+            "redistributed_to": [{"metric_id": "E3", "points_added": 4}]
+        })
+        missing_adjustments.append({
+            "metric_id": "E2",
+            "reason": "Categorisation data not available via Xero API",
+            "points_redistributed": 3,
+            "redistributed_to": [{"metric_id": "E3", "points_added": 3}]
+        })
+        
+        category_e_points = e3_base_points  # E3 now worth full 10 points
         
         # =====================
         # FINAL SCORE CALCULATION
