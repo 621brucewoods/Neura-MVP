@@ -627,6 +627,72 @@ class Extractors:
         return InvoiceExtractor.extract(invoice_data)
     
     @staticmethod
+    def extract_monthly_pnl_totals(
+        monthly_pnl_data: list[dict[str, Any]],
+        account_map: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """
+        Extract P&L totals from monthly P&L data.
+        
+        Takes the raw monthly P&L data from fetcher and extracts revenue,
+        expenses, etc. using AccountType-based extraction.
+        
+        Args:
+            monthly_pnl_data: List of monthly P&L data from fetch_monthly_pnl()
+            account_map: AccountID → AccountInfo mapping
+            
+        Returns:
+            List of monthly P&L with extracted totals, sorted newest first
+        """
+        result = []
+        
+        for month_entry in monthly_pnl_data:
+            month_key = month_entry.get("month_key")
+            raw_data = month_entry.get("raw_data", month_entry.get("data", {}))
+            
+            if not raw_data:
+                # No data for this month
+                result.append({
+                    "month_key": month_key,
+                    "year": month_entry.get("year"),
+                    "month": month_entry.get("month"),
+                    "revenue": None,
+                    "cost_of_sales": None,
+                    "expenses": None,
+                    "gross_profit": None,
+                    "net_profit": None,
+                    "has_data": False,
+                })
+                continue
+            
+            # Extract P&L using trial balance extractor logic
+            # Note: Monthly P&L reports have same structure as Trial Balance
+            pnl = PnLExtractor.extract(raw_data, account_map)
+            
+            result.append({
+                "month_key": month_key,
+                "year": month_entry.get("year"),
+                "month": month_entry.get("month"),
+                "revenue": pnl.get("revenue"),
+                "cost_of_sales": pnl.get("cost_of_sales"),
+                "expenses": pnl.get("expenses"),
+                "gross_profit": pnl.get("gross_profit"),
+                "net_profit": pnl.get("net_profit"),
+                "has_data": pnl.get("revenue") is not None,
+            })
+        
+        # Sort by month (newest first)
+        result.sort(key=lambda x: x.get("month_key", ""), reverse=True)
+        
+        logger.info(
+            "Extracted P&L totals for %d months: %s",
+            len(result),
+            [f"{m['month_key']}:${m.get('revenue') or 0:.0f}" for m in result[:3]]
+        )
+        
+        return result
+    
+    @staticmethod
     def extract_all(
         balance_sheet_raw: dict[str, Any],
         trial_balance_raw: dict[str, Any],

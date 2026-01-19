@@ -314,4 +314,88 @@ class XeroDataOrchestrator:
         except Exception as e:
             logger.error("Failed to fetch all data: %s", e)
             raise XeroDataFetchError(f"Failed to fetch all data: {str(e)}") from e
+    
+    async def fetch_monthly_pnl_with_cache(
+        self,
+        organization_id: UUID,
+        num_months: int = 12,
+        force_refresh: bool = False,
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch monthly P&L data with intelligent caching.
+        
+        Caching Strategy:
+        - Current month: Always re-fetch (1 hour TTL)
+        - Last month: Re-fetch if expired (24 hour TTL)
+        - Historical months: Use cache if available (never expires)
+        
+        Args:
+            organization_id: Organization UUID
+            num_months: Number of months to fetch (default 12)
+            force_refresh: If True, bypass cache and fetch all months
+            
+        Returns:
+            List of monthly P&L data, sorted newest to oldest
+        """
+        cached_month_keys: set[str] = set()
+        cached_data: dict[str, dict[str, Any]] = {}
+        
+        # Get cached data (unless force refresh)
+        if not force_refresh and self.cache_service:
+            cached_data, cached_month_keys = await self.cache_service.get_cached_monthly_pnl(
+                organization_id, num_months
+            )
+            logger.info(
+                "Monthly P&L cache: %d months cached for org %s",
+                len(cached_month_keys),
+                organization_id,
+            )
+        
+        # Fetch missing/expired months
+        fetched_data = await self.profit_loss_fetcher.fetch_monthly_pnl(
+            num_months=num_months,
+            cached_months=cached_month_keys if not force_refresh else None,
+        )
+        
+        # Save newly fetched data to cache
+        if fetched_data and self.cache_service:
+            await self.cache_service.save_monthly_pnl_cache(
+                organization_id, fetched_data
+            )
+        
+        # Merge cached and fetched data
+        # Fetched data takes priority (it's fresher)
+        all_data = {}
+        
+        # Add cached data first
+        for month_key, data in cached_data.items():
+            all_data[month_key] = data
+        
+        # Override with freshly fetched data
+        for entry in fetched_data:
+            if "error" not in entry:
+                all_data[entry["month_key"]] = {
+                    "month_key": entry["month_key"],
+                    "year": entry["year"],
+                    "month": entry["month"],
+                    "raw_data": entry.get("data", {}),
+                    # P&L totals will be extracted later by Extractors
+                    "revenue": None,
+                    "cost_of_sales": None,
+                    "expenses": None,
+                    "net_profit": None,
+                    "is_fresh": True,
+                }
+        
+        # Sort by month (newest first) and return as list
+        sorted_months = sorted(all_data.keys(), reverse=True)
+        result = [all_data[k] for k in sorted_months]
+        
+        logger.info(
+            "Monthly P&L complete for org %s: %d months available",
+            organization_id,
+            len(result),
+        )
+        
+        return result
 

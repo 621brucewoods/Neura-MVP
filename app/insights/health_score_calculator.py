@@ -117,6 +117,68 @@ class HealthScoreCalculator:
         return numerator / denominator
     
     @staticmethod
+    def _calculate_std_dev(values: list[float]) -> float:
+        """Calculate standard deviation of a list of values."""
+        if not values or len(values) < 2:
+            return 0.0
+        n = len(values)
+        mean = sum(values) / n
+        variance = sum((x - mean) ** 2 for x in values) / n
+        return variance ** 0.5
+    
+    @staticmethod
+    def _score_cash_volatility(volatility_ratio: Optional[float]) -> tuple[float, str]:
+        """Score A2: Cash volatility (10 pts max)."""
+        if volatility_ratio is None:
+            return 0, "≤10% → 10"
+        
+        volatility_pct = volatility_ratio * 100
+        if volatility_pct <= 10:
+            return 10, "≤10% → 10"
+        elif volatility_pct <= 20:
+            return 8, "10-20% → 8"
+        elif volatility_pct <= 35:
+            return 5, "20-35% → 5"
+        elif volatility_pct <= 50:
+            return 2, "35-50% → 2"
+        else:
+            return 0, ">50% → 0"
+    
+    @staticmethod
+    def _score_revenue_trend(growth_3v3: Optional[float]) -> tuple[float, str]:
+        """Score C1: Revenue trend (10 pts max)."""
+        if growth_3v3 is None:
+            return 0, "≥+15% → 10"
+        
+        growth_pct = growth_3v3 * 100
+        if growth_pct >= 15:
+            return 10, "≥+15% → 10"
+        elif growth_pct >= 5:
+            return 8, "+5% to +14.9% → 8"
+        elif growth_pct >= -5:
+            return 6, "-4.9% to +4.9% → 6"
+        elif growth_pct >= -15:
+            return 3, "-5% to -14.9% → 3"
+        else:
+            return 0, "≤-15% → 0"
+    
+    @staticmethod
+    def _score_revenue_consistency(rev_cv: Optional[float]) -> tuple[float, str]:
+        """Score C2: Revenue consistency (5 pts max)."""
+        if rev_cv is None:
+            return 0, "≤15% → 5"
+        
+        cv_pct = rev_cv * 100
+        if cv_pct <= 15:
+            return 5, "≤15% → 5"
+        elif cv_pct <= 30:
+            return 3, "15-30% → 3"
+        elif cv_pct <= 50:
+            return 1, "30-50% → 1"
+        else:
+            return 0, ">50% → 0"
+    
+    @staticmethod
     def _score_runway_months(runway_months: Optional[float]) -> tuple[float, str]:
         """Score A1: Runway months (15 pts max)."""
         if runway_months is None:
@@ -350,6 +412,7 @@ class HealthScoreCalculator:
         trial_balance_pnl: dict[str, Optional[float]],
         invoices_receivable: dict[str, Any],
         invoices_payable: dict[str, Any],
+        monthly_pnl_data: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         """
         Calculate Business Health Score v1.
@@ -359,6 +422,8 @@ class HealthScoreCalculator:
             trial_balance_pnl: From TrialBalanceParser.extract_pnl()
             invoices_receivable: From InvoicesFetcher.fetch_receivables()
             invoices_payable: From InvoicesFetcher.fetch_payables()
+            monthly_pnl_data: Optional list of monthly P&L data (newest first) with
+                              keys: month_key, revenue, expenses, net_profit
         
         Returns:
             Complete Health Score result including score, grade, confidence,
@@ -376,6 +441,26 @@ class HealthScoreCalculator:
         revenue = trial_balance_pnl.get("revenue")
         cost_of_sales = trial_balance_pnl.get("cost_of_sales")
         expenses = trial_balance_pnl.get("expenses")
+        
+        # Process monthly P&L data for historical metrics
+        monthly_pnl = monthly_pnl_data or []
+        has_monthly_data = len(monthly_pnl) >= 3  # Need at least 3 months
+        has_6_months = len(monthly_pnl) >= 6
+        
+        # Extract monthly revenue/expenses lists (newest first)
+        monthly_revenues = []
+        monthly_expenses = []
+        monthly_net_cash_proxy = []  # Revenue - Expenses (cash proxy)
+        
+        for month in monthly_pnl:
+            rev = month.get("revenue")
+            exp = month.get("expenses")
+            if rev is not None:
+                monthly_revenues.append(float(rev))
+            if exp is not None:
+                monthly_expenses.append(float(exp))
+            if rev is not None and exp is not None:
+                monthly_net_cash_proxy.append(float(rev) - float(exp))
         
         # Calculate intermediate values
         gross_profit = None
@@ -454,23 +539,38 @@ class HealthScoreCalculator:
             inputs_used=["balance_sheet_totals.cash", "trial_balance_pnl.expenses", "trial_balance_pnl.revenue"]
         )
         
-        # A2: Cash volatility (10 pts) - MISSING (needs historical data)
+        # A2: Cash volatility (10 pts) - uses monthly data if available
+        cash_volatility_ratio = None
+        a2_status = MetricStatus.MISSING
+        a2_points = 0
+        
+        if has_monthly_data and len(monthly_net_cash_proxy) >= 3 and len(monthly_revenues) >= 3:
+            # Calculate volatility: StdDev(MonthlyNetCashProxy) / AvgRevenue(3mo)
+            std_dev = HealthScoreCalculator._calculate_std_dev(monthly_net_cash_proxy[:3])
+            avg_revenue_3m = sum(monthly_revenues[:3]) / 3 if monthly_revenues[:3] else 1
+            if avg_revenue_3m > 0:
+                cash_volatility_ratio = std_dev / avg_revenue_3m
+                a2_points, _ = HealthScoreCalculator._score_cash_volatility(cash_volatility_ratio)
+                a2_status = MetricStatus.OK
+        
         sub_scores["A2"] = SubScore(
             metric_id="A2",
             name="Cash Volatility",
             max_points=10,
-            points_awarded=0,
-            status=MetricStatus.MISSING,
-            value=None,
+            points_awarded=a2_points,
+            status=a2_status,
+            value=cash_volatility_ratio,
             formula="StdDev(MonthlyNetCashProxy) / AvgRevenue(3mo)",
-            inputs_used=[]
+            inputs_used=["monthly_pnl_data"] if has_monthly_data else []
         )
-        missing_adjustments.append({
-            "metric_id": "A2",
-            "reason": "Historical monthly P&L data not available",
-            "points_redistributed": 10,
-            "redistributed_to": [{"metric_id": "A1", "points_added": 10}]
-        })
+        
+        if a2_status == MetricStatus.MISSING:
+            missing_adjustments.append({
+                "metric_id": "A2",
+                "reason": "Historical monthly P&L data not available",
+                "points_redistributed": 10,
+                "redistributed_to": [{"metric_id": "A1", "points_added": 10}]
+            })
         
         # A3: AR to Cash ratio (5 pts)
         a3_points, a3_threshold = HealthScoreCalculator._score_ar_to_cash(ar_to_cash)
@@ -485,14 +585,14 @@ class HealthScoreCalculator:
             inputs_used=["balance_sheet_totals.accounts_receivable", "balance_sheet_totals.cash"]
         )
         
-        # Redistribute A2 points to A1
+        # Redistribute A2 points to A1 (only if A2 is missing)
         if sub_scores["A2"].status == MetricStatus.MISSING:
             # Scale A1 to absorb A2's points (A1 now worth 25 out of 30)
             a1_scale = 25 / 15
             sub_scores["A1"].points_awarded = min(25, sub_scores["A1"].points_awarded * a1_scale)
             sub_scores["A1"].max_points = 25
         
-        category_a_points = sum(s.points_awarded for s in [sub_scores["A1"], sub_scores["A3"]])
+        category_a_points = sum(s.points_awarded for s in [sub_scores["A1"], sub_scores["A2"], sub_scores["A3"]])
         
         # =====================
         # CATEGORY B: Profitability & Efficiency (25 points)
@@ -554,49 +654,83 @@ class HealthScoreCalculator:
         
         # =====================
         # CATEGORY C: Revenue Quality & Momentum (15 points)
-        # MISSING - needs historical data
+        # Uses monthly historical data when available
         # =====================
+        
+        # C1: Revenue Trend (10 pts) - compares last 3 months vs prior 3 months
+        growth_3v3 = None
+        c1_status = MetricStatus.MISSING
+        c1_points = 0
+        
+        if len(monthly_revenues) >= 6:
+            # Last 3 months (indices 0,1,2) vs prior 3 months (indices 3,4,5)
+            rev_last_3 = sum(monthly_revenues[:3])
+            rev_prev_3 = sum(monthly_revenues[3:6])
+            if rev_prev_3 > 0:
+                growth_3v3 = (rev_last_3 - rev_prev_3) / rev_prev_3
+                c1_points, _ = HealthScoreCalculator._score_revenue_trend(growth_3v3)
+                c1_status = MetricStatus.OK
         
         sub_scores["C1"] = SubScore(
             metric_id="C1",
             name="Revenue Trend",
             max_points=10,
-            points_awarded=0,
-            status=MetricStatus.MISSING,
-            value=None,
+            points_awarded=c1_points,
+            status=c1_status,
+            value=growth_3v3,
             formula="(Rev_last3 - Rev_prev3) / Rev_prev3",
-            inputs_used=[]
+            inputs_used=["monthly_pnl_data"] if c1_status == MetricStatus.OK else []
         )
+        
+        # C2: Revenue Consistency (5 pts) - CV of 6 months revenue
+        rev_cv = None
+        c2_status = MetricStatus.MISSING
+        c2_points = 0
+        
+        if has_6_months and len(monthly_revenues) >= 6:
+            avg_rev_6m = sum(monthly_revenues[:6]) / 6
+            if avg_rev_6m > 0:
+                std_dev_rev = HealthScoreCalculator._calculate_std_dev(monthly_revenues[:6])
+                rev_cv = std_dev_rev / avg_rev_6m
+                c2_points, _ = HealthScoreCalculator._score_revenue_consistency(rev_cv)
+                c2_status = MetricStatus.OK
         
         sub_scores["C2"] = SubScore(
             metric_id="C2",
             name="Revenue Consistency",
             max_points=5,
-            points_awarded=0,
-            status=MetricStatus.MISSING,
-            value=None,
+            points_awarded=c2_points,
+            status=c2_status,
+            value=rev_cv,
             formula="StdDev(MonthlyRevenue_6mo) / Avg(MonthlyRevenue_6mo)",
-            inputs_used=[]
+            inputs_used=["monthly_pnl_data"] if c2_status == MetricStatus.OK else []
         )
         
-        missing_adjustments.append({
-            "metric_id": "C1",
-            "reason": "Historical monthly revenue data not available",
-            "points_redistributed": 10,
-            "redistributed_to": [{"metric_id": "B1", "points_added": 5}, {"metric_id": "D1", "points_added": 5}]
-        })
-        missing_adjustments.append({
-            "metric_id": "C2",
-            "reason": "Historical monthly revenue data not available",
-            "points_redistributed": 5,
-            "redistributed_to": [{"metric_id": "B3", "points_added": 5}]
-        })
+        # Handle missing C metrics - redistribute to B and D
+        c1_missing = c1_status == MetricStatus.MISSING
+        c2_missing = c2_status == MetricStatus.MISSING
         
-        # Redistribute C points to B and D
-        sub_scores["B1"].points_awarded = min(15, sub_scores["B1"].points_awarded + 5 * (sub_scores["B1"].points_awarded / 10))
-        sub_scores["B3"].points_awarded = min(12, sub_scores["B3"].points_awarded + 5 * (sub_scores["B3"].points_awarded / sub_scores["B3"].max_points))
+        if c1_missing:
+            missing_adjustments.append({
+                "metric_id": "C1",
+                "reason": "Historical monthly revenue data not available (need 6 months)",
+                "points_redistributed": 10,
+                "redistributed_to": [{"metric_id": "B1", "points_added": 5}, {"metric_id": "D1", "points_added": 5}]
+            })
+            # Redistribute C1 points to B1 and D1
+            sub_scores["B1"].points_awarded = min(15, sub_scores["B1"].points_awarded + 5 * (sub_scores["B1"].points_awarded / 10))
         
-        category_c_points = 0  # All metrics missing
+        if c2_missing:
+            missing_adjustments.append({
+                "metric_id": "C2",
+                "reason": "Historical monthly revenue data not available (need 6 months)",
+                "points_redistributed": 5,
+                "redistributed_to": [{"metric_id": "B3", "points_added": 5}]
+            })
+            # Redistribute C2 points to B3
+            sub_scores["B3"].points_awarded = min(12, sub_scores["B3"].points_awarded + 5 * (sub_scores["B3"].points_awarded / sub_scores["B3"].max_points))
+        
+        category_c_points = sub_scores["C1"].points_awarded + sub_scores["C2"].points_awarded
         
         # =====================
         # CATEGORY D: Working Capital & Liquidity (20 points)
@@ -615,9 +749,10 @@ class HealthScoreCalculator:
             inputs_used=["balance_sheet_totals.current_assets_total", "balance_sheet_totals.current_liabilities_total"]
         )
         
-        # Add redistributed C1 points
-        sub_scores["D1"].points_awarded = min(13, sub_scores["D1"].points_awarded + 5 * (d1_points / 8))
-        sub_scores["D1"].max_points = 13
+        # Add redistributed C1 points (only if C1 is missing)
+        if c1_missing:
+            sub_scores["D1"].points_awarded = min(13, sub_scores["D1"].points_awarded + 5 * (d1_points / 8))
+            sub_scores["D1"].max_points = 13
         
         # D2: Quick ratio (5 pts)
         d2_points, d2_threshold = HealthScoreCalculator._score_quick_ratio(quick_ratio)

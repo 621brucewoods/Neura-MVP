@@ -16,8 +16,15 @@ from app.config import settings
 from app.models.executive_summary_cache import ExecutiveSummaryCache
 from app.models.financial_cache import FinancialCache
 from app.models.profit_loss_cache import ProfitLossCache
+from app.models.monthly_pnl_cache import MonthlyPnLCache
 
 logger = logging.getLogger(__name__)
+
+
+# TTL Constants for monthly P&L cache
+CURRENT_MONTH_TTL_HOURS = 1  # Re-fetch current month every hour
+LAST_MONTH_TTL_HOURS = 24    # Re-fetch last month every 24 hours
+# Historical months: expires_at = None (never expires)
 
 
 
@@ -455,4 +462,197 @@ class CacheService:
             )
             self.db.add(cache)
         return cache
+    
+    # =====================================================
+    # Monthly P&L Cache Methods
+    # =====================================================
+    
+    def _calculate_monthly_pnl_expires_at(self, year: int, month: int) -> Optional[datetime]:
+        """
+        Calculate expiration time for monthly P&L cache.
+        
+        - Current month: 1 hour TTL
+        - Last month: 24 hour TTL  
+        - Historical months: Never expires (returns None)
+        """
+        today = date.today()
+        
+        # Current month
+        if year == today.year and month == today.month:
+            return datetime.now(timezone.utc) + timedelta(hours=CURRENT_MONTH_TTL_HOURS)
+        
+        # Last month
+        last_month = (today.replace(day=1) - timedelta(days=1))
+        if year == last_month.year and month == last_month.month:
+            return datetime.now(timezone.utc) + timedelta(hours=LAST_MONTH_TTL_HOURS)
+        
+        # Historical months - never expire
+        return None
+    
+    async def get_cached_monthly_pnl(
+        self,
+        organization_id: UUID,
+        num_months: int = 12,
+    ) -> tuple[dict[str, dict[str, Any]], set[str]]:
+        """
+        Get cached monthly P&L data.
+        
+        Args:
+            organization_id: Organization UUID
+            num_months: Number of months to check (default 12)
+            
+        Returns:
+            Tuple of:
+            - cached_data: Dict mapping month_key -> cached data (only fresh entries)
+            - cached_month_keys: Set of month_keys that are cached and fresh
+        """
+        # Calculate month keys for the period
+        today = date.today()
+        month_keys = []
+        current = today.replace(day=1)
+        
+        for _ in range(num_months):
+            month_keys.append(f"{current.year}-{current.month:02d}")
+            current = (current - timedelta(days=1)).replace(day=1)
+        
+        # Query cached data
+        stmt = (
+            select(MonthlyPnLCache)
+            .where(MonthlyPnLCache.organization_id == organization_id)
+            .where(MonthlyPnLCache.month_key.in_(month_keys))
+        )
+        result = await self.db.execute(stmt)
+        cached_entries = result.scalars().all()
+        
+        # Filter to only fresh entries
+        cached_data = {}
+        cached_month_keys = set()
+        
+        for entry in cached_entries:
+            if entry.is_fresh:
+                cached_data[entry.month_key] = entry.to_dict()
+                cached_month_keys.add(entry.month_key)
+            else:
+                logger.debug("Expired cache for month %s", entry.month_key)
+        
+        logger.info(
+            "Monthly P&L cache hit for org %s: %d/%d months cached",
+            organization_id,
+            len(cached_month_keys),
+            num_months,
+        )
+        
+        return cached_data, cached_month_keys
+    
+    async def save_monthly_pnl_cache(
+        self,
+        organization_id: UUID,
+        monthly_data: list[dict[str, Any]],
+    ) -> None:
+        """
+        Save monthly P&L data to cache.
+        
+        Args:
+            organization_id: Organization UUID
+            monthly_data: List of monthly P&L data from fetcher
+        """
+        now = datetime.now(timezone.utc)
+        
+        for month_entry in monthly_data:
+            year = month_entry["year"]
+            month = month_entry["month"]
+            month_key = month_entry["month_key"]
+            pnl_data = month_entry.get("data", {})
+            
+            # Skip entries with errors
+            if "error" in month_entry:
+                logger.warning("Skipping cache for %s due to fetch error", month_key)
+                continue
+            
+            # Calculate TTL based on month
+            expires_at = self._calculate_monthly_pnl_expires_at(year, month)
+            
+            # Check if entry exists
+            stmt = (
+                select(MonthlyPnLCache)
+                .where(MonthlyPnLCache.organization_id == organization_id)
+                .where(MonthlyPnLCache.month_key == month_key)
+            )
+            result = await self.db.execute(stmt)
+            existing = result.scalar_one_or_none()
+            
+            # Extract P&L totals (will be populated by Extractors later)
+            # For now, store raw data - extraction happens in orchestrator
+            revenue = None
+            cost_of_sales = None
+            expenses = None
+            net_profit = None
+            
+            if existing:
+                # Update existing
+                existing.raw_data = pnl_data
+                existing.revenue = Decimal(str(revenue)) if revenue else None
+                existing.cost_of_sales = Decimal(str(cost_of_sales)) if cost_of_sales else None
+                existing.expenses = Decimal(str(expenses)) if expenses else None
+                existing.net_profit = Decimal(str(net_profit)) if net_profit else None
+                existing.fetched_at = now
+                existing.expires_at = expires_at
+            else:
+                # Create new
+                new_cache = MonthlyPnLCache(
+                    organization_id=organization_id,
+                    month_key=month_key,
+                    year=year,
+                    month=month,
+                    revenue=Decimal(str(revenue)) if revenue else None,
+                    cost_of_sales=Decimal(str(cost_of_sales)) if cost_of_sales else None,
+                    expenses=Decimal(str(expenses)) if expenses else None,
+                    net_profit=Decimal(str(net_profit)) if net_profit else None,
+                    raw_data=pnl_data,
+                    fetched_at=now,
+                    expires_at=expires_at,
+                )
+                self.db.add(new_cache)
+        
+        await self.db.commit()
+        logger.info(
+            "Saved monthly P&L cache for org %s: %d months",
+            organization_id,
+            len([m for m in monthly_data if "error" not in m]),
+        )
+    
+    async def get_all_monthly_pnl(
+        self,
+        organization_id: UUID,
+        num_months: int = 12,
+    ) -> list[dict[str, Any]]:
+        """
+        Get all monthly P&L data (cached, sorted newest first).
+        
+        Args:
+            organization_id: Organization UUID
+            num_months: Number of months to retrieve
+            
+        Returns:
+            List of monthly P&L data dicts, sorted newest to oldest
+        """
+        # Calculate month keys
+        today = date.today()
+        month_keys = []
+        current = today.replace(day=1)
+        
+        for _ in range(num_months):
+            month_keys.append(f"{current.year}-{current.month:02d}")
+            current = (current - timedelta(days=1)).replace(day=1)
+        
+        stmt = (
+            select(MonthlyPnLCache)
+            .where(MonthlyPnLCache.organization_id == organization_id)
+            .where(MonthlyPnLCache.month_key.in_(month_keys))
+            .order_by(MonthlyPnLCache.month_key.desc())
+        )
+        result = await self.db.execute(stmt)
+        entries = result.scalars().all()
+        
+        return [entry.to_dict() for entry in entries]
 

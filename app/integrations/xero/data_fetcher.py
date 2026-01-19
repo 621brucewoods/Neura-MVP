@@ -136,7 +136,7 @@ class XeroDataFetcher:
         """
         return await self.orchestrator.fetch_all(
             organization_id=organization_id,
-                            start_date=start_date,
+            start_date=start_date,
             end_date=end_date,
             force_refresh=force_refresh,
         )

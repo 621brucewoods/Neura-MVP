@@ -8,26 +8,25 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
-from app.models.organization import Organization, SyncStatus, SyncStep
-from app.insights.sync_service import SyncService
-from app.database.connection import async_session_factory
-from app.auth.dependencies import get_current_user
-from app.database.connection import get_async_session
-from app.models.user import User
-from app.models.insight import Insight as InsightModel
-from app.insights.service import InsightsService
-from app.insights.schemas import InsightsResponse, Insight, InsightUpdate
-from app.insights.data_summarizer import DataSummarizer
-from app.models.insight import Insight as InsightModel
-from app.models.calculated_metrics import CalculatedMetrics
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, desc, func
-from app.database.connection import async_session_factory
-from app.integrations.xero.cache_service import CacheService
-from app.integrations.xero.sdk_client import create_xero_sdk_client, XeroSDKClientError
-from app.integrations.xero.data_fetcher import XeroDataFetcher
-from app.insights.insight_generator import InsightGenerator
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.auth.dependencies import get_current_user
+from app.database.connection import async_session_factory, get_async_session
+from app.insights.data_summarizer import DataSummarizer
 from app.insights.health_score_calculator import HealthScoreCalculator
+from app.insights.insight_generator import InsightGenerator
+from app.insights.schemas import InsightsResponse, Insight, InsightUpdate
+from app.insights.service import InsightsService
+from app.insights.sync_service import SyncService
+from app.integrations.xero.cache_service import CacheService
+from app.integrations.xero.data_fetcher import XeroDataFetcher
+from app.integrations.xero.extractors import Extractors
+from app.integrations.xero.sdk_client import create_xero_sdk_client, XeroSDKClientError
+from app.models.calculated_metrics import CalculatedMetrics
+from app.models.insight import Insight as InsightModel
+from app.models.organization import Organization, SyncStatus, SyncStep
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -318,12 +317,40 @@ async def get_health_score(
             invoices_receivable = financial_data.get("invoices_receivable", {})
             invoices_payable = financial_data.get("invoices_payable", {})
         
+        # Fetch monthly P&L data for historical metrics (C1, C2, A2)
+        monthly_pnl_data = None
+        try:
+            monthly_pnl_raw = await data_fetcher.orchestrator.fetch_monthly_pnl_with_cache(
+                organization_id=current_user.organization.id,
+                num_months=12,
+                force_refresh=force_refresh,
+            )
+            
+            # Get account map for extraction
+            account_map = financial_data.get("account_type_map", {})
+            
+            # Extract P&L totals from monthly data
+            if monthly_pnl_raw and account_map:
+                monthly_pnl_data = Extractors.extract_monthly_pnl_totals(
+                    monthly_pnl_raw,
+                    account_map,
+                )
+                logger.info(
+                    "Fetched %d months of P&L data for health score",
+                    len(monthly_pnl_data),
+                )
+        except Exception as e:
+            # Non-fatal: continue without historical data
+            logger.warning("Could not fetch monthly P&L data: %s", e)
+            monthly_pnl_data = None
+        
         # Calculate Health Score
         health_score = HealthScoreCalculator.calculate(
             balance_sheet_totals=balance_sheet_totals,
             trial_balance_pnl=trial_balance_pnl,
             invoices_receivable=invoices_receivable,
             invoices_payable=invoices_payable,
+            monthly_pnl_data=monthly_pnl_data,
         )
         
         # Add organization and period info
@@ -338,11 +365,16 @@ async def get_health_score(
             "tenant_id": xero_tenant_id,
             "currency": "AUD",  # Could be fetched from Xero org settings
         }
+        # Calculate number of months of P&L data available
+        pnl_months_count = len(monthly_pnl_data) if monthly_pnl_data else 1
+        pnl_start = monthly_pnl_data[-1]["month_key"] if monthly_pnl_data else start_date.isoformat()[:7]
+        pnl_end = monthly_pnl_data[0]["month_key"] if monthly_pnl_data else end_date.isoformat()[:7]
+        
         health_score["periods"] = {
             "pnl_monthly": {
-                "start_date": start_date.isoformat(),
+                "start_date": f"{pnl_start}-01" if "-" in str(pnl_start) and len(str(pnl_start)) == 7 else start_date.isoformat(),
                 "end_date": end_date.isoformat(),
-                "months": 1,  # Currently single month
+                "months": pnl_months_count,
             },
             "rolling_3m": {
                 "end_date": end_date.isoformat(),
