@@ -407,6 +407,57 @@ class HealthScoreCalculator:
             return Confidence.LOW
     
     @staticmethod
+    def _build_data_quality_signals(
+        has_monthly_data: bool,
+        has_6_months: bool
+    ) -> list[dict[str, str]]:
+        """Build data quality signals based on actual data availability."""
+        signals = []
+        
+        # Only add historical data warning if we don't have enough data
+        if not has_6_months:
+            signals.append({
+                "signal_id": "DQ_MISSING_HISTORICAL",
+                "severity": "warning",
+                "message": "Less than 6 months of historical data. Revenue trends and consistency metrics may be limited."
+            })
+        elif not has_monthly_data:
+            signals.append({
+                "signal_id": "DQ_LIMITED_HISTORICAL",
+                "severity": "info",
+                "message": "Limited historical data available. Some metrics use shorter time periods."
+            })
+        
+        # Bank reconciliation is always unavailable from Xero API (info only)
+        signals.append({
+            "signal_id": "DQ_MISSING_RECON",
+            "severity": "info",
+            "message": "Bank reconciliation status not available from API."
+        })
+        
+        return signals
+    
+    @staticmethod
+    def _build_data_quality_warnings(
+        has_monthly_data: bool,
+        missing_adjustments: list[dict[str, Any]]
+    ) -> list[str]:
+        """Build data quality warnings based on actual conditions."""
+        warnings = []
+        
+        # Only warn about missing data if we actually don't have it
+        if not has_monthly_data:
+            warnings.append("Score may be conservative due to missing historical data.")
+        
+        # Only warn about redistributions if there were any
+        if missing_adjustments:
+            total_redistributed = sum(adj.get("points_redistributed", 0) for adj in missing_adjustments)
+            if total_redistributed > 0:
+                warnings.append(f"{len(missing_adjustments)} metrics ({total_redistributed} points) were redistributed due to missing data.")
+        
+        return warnings
+    
+    @staticmethod
     def calculate(
         balance_sheet_totals: dict[str, Optional[float]],
         invoices_receivable: dict[str, Any],
@@ -1037,22 +1088,8 @@ class HealthScoreCalculator:
             },
             "missing_data_adjustments": missing_adjustments,
             "data_quality": {
-                "signals": [
-                    {
-                        "signal_id": "DQ_MISSING_HISTORICAL",
-                        "severity": "warning",
-                        "message": "Historical monthly data not available. Revenue trends and cash volatility cannot be calculated."
-                    },
-                    {
-                        "signal_id": "DQ_MISSING_RECON",
-                        "severity": "info",
-                        "message": "Bank reconciliation status not available from API."
-                    },
-                ],
-                "warnings": [
-                    "Score may be conservative due to missing historical data.",
-                    "Revenue trend metrics (15 points) were redistributed to other categories.",
-                ],
+                "signals": HealthScoreCalculator._build_data_quality_signals(has_monthly_data, has_6_months),
+                "warnings": HealthScoreCalculator._build_data_quality_warnings(has_monthly_data, missing_adjustments),
             },
             "intermediates": {
                 "cash_available": cash,
