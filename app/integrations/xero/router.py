@@ -360,23 +360,19 @@ async def sync_xero_data(
         data_fetcher = XeroDataFetcher(sdk_client, cache_service=cache_service, db=db)
         
         # Fetch all data (with caching)
+        # Use end_date as balance_sheet_date (the "as of" date for Balance Sheet)
         data = await data_fetcher.fetch_all_data(
             organization_id=current_user.organization.id,
-            start_date=start_date,
-            end_date=end_date,
+            balance_sheet_date=end_date,
             force_refresh=force_refresh,
         )
         
         # Note: Token updates are flushed automatically by fetchers
         # FastAPI will auto-commit everything at the end
         
-        # Calculate period description
-        days_diff = (end_date - start_date).days
-        period_description = f"{days_diff} days" if days_diff < 30 else f"{days_diff // 30} months"
-        
         return XeroSyncResponse(
             success=True,
-            message=f"Successfully fetched financial data for period: {start_date} to {end_date} ({period_description})",
+            message=f"Successfully fetched financial data as of {end_date}",
             data=data,
             fetched_at=data.get("fetched_at", ""),
         )

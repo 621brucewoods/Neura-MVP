@@ -17,6 +17,7 @@ from app.models.executive_summary_cache import ExecutiveSummaryCache
 from app.models.financial_cache import FinancialCache
 from app.models.profit_loss_cache import ProfitLossCache
 from app.models.monthly_pnl_cache import MonthlyPnLCache
+from app.integrations.xero.extractors import PnLExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -548,15 +549,18 @@ class CacheService:
         self,
         organization_id: UUID,
         monthly_data: list[dict[str, Any]],
+        account_map: Optional[dict[str, Any]] = None,
     ) -> None:
         """
-        Save monthly P&L data to cache.
+        Save monthly P&L data to cache with extracted totals.
         
         Args:
             organization_id: Organization UUID
             monthly_data: List of monthly P&L data from fetcher
+            account_map: AccountID → AccountInfo mapping for P&L extraction
         """
         now = datetime.now(timezone.utc)
+        saved_count = 0
         
         for month_entry in monthly_data:
             year = month_entry["year"]
@@ -572,6 +576,28 @@ class CacheService:
             # Calculate TTL based on month
             expires_at = self._calculate_monthly_pnl_expires_at(year, month)
             
+            # Extract P&L totals so cache has usable values
+            revenue = None
+            cost_of_sales = None
+            expenses = None
+            net_profit = None
+            
+            if pnl_data and account_map:
+                try:
+                    pnl_extracted = PnLExtractor.extract(pnl_data, account_map)
+                    revenue = pnl_extracted.get("revenue")
+                    cost_of_sales = pnl_extracted.get("cost_of_sales")
+                    expenses = pnl_extracted.get("expenses")
+                    net_profit = pnl_extracted.get("net_profit")
+                    
+                    if revenue is not None:
+                        logger.debug(
+                            "Extracted P&L for %s: revenue=%.2f, expenses=%.2f, net=%.2f",
+                            month_key, revenue, expenses or 0, net_profit or 0
+                        )
+                except Exception as e:
+                    logger.warning("Failed to extract P&L for %s: %s", month_key, e)
+            
             # Check if entry exists
             stmt = (
                 select(MonthlyPnLCache)
@@ -581,20 +607,13 @@ class CacheService:
             result = await self.db.execute(stmt)
             existing = result.scalar_one_or_none()
             
-            # Extract P&L totals (will be populated by Extractors later)
-            # For now, store raw data - extraction happens in orchestrator
-            revenue = None
-            cost_of_sales = None
-            expenses = None
-            net_profit = None
-            
             if existing:
                 # Update existing
                 existing.raw_data = pnl_data
-                existing.revenue = Decimal(str(revenue)) if revenue else None
-                existing.cost_of_sales = Decimal(str(cost_of_sales)) if cost_of_sales else None
-                existing.expenses = Decimal(str(expenses)) if expenses else None
-                existing.net_profit = Decimal(str(net_profit)) if net_profit else None
+                existing.revenue = Decimal(str(revenue)) if revenue is not None else None
+                existing.cost_of_sales = Decimal(str(cost_of_sales)) if cost_of_sales is not None else None
+                existing.expenses = Decimal(str(expenses)) if expenses is not None else None
+                existing.net_profit = Decimal(str(net_profit)) if net_profit is not None else None
                 existing.fetched_at = now
                 existing.expires_at = expires_at
             else:
@@ -604,21 +623,23 @@ class CacheService:
                     month_key=month_key,
                     year=year,
                     month=month,
-                    revenue=Decimal(str(revenue)) if revenue else None,
-                    cost_of_sales=Decimal(str(cost_of_sales)) if cost_of_sales else None,
-                    expenses=Decimal(str(expenses)) if expenses else None,
-                    net_profit=Decimal(str(net_profit)) if net_profit else None,
+                    revenue=Decimal(str(revenue)) if revenue is not None else None,
+                    cost_of_sales=Decimal(str(cost_of_sales)) if cost_of_sales is not None else None,
+                    expenses=Decimal(str(expenses)) if expenses is not None else None,
+                    net_profit=Decimal(str(net_profit)) if net_profit is not None else None,
                     raw_data=pnl_data,
                     fetched_at=now,
                     expires_at=expires_at,
                 )
                 self.db.add(new_cache)
+            
+            saved_count += 1
         
         await self.db.commit()
         logger.info(
-            "Saved monthly P&L cache for org %s: %d months",
+            "Saved monthly P&L cache for org %s: %d months (with extracted totals)",
             organization_id,
-            len([m for m in monthly_data if "error" not in m]),
+            saved_count,
         )
     
     async def get_all_monthly_pnl(

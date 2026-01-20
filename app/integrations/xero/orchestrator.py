@@ -251,6 +251,7 @@ class XeroDataOrchestrator:
     async def fetch_monthly_pnl_with_cache(
         self,
         organization_id: UUID,
+        account_map: Optional[dict[str, Any]] = None,
         num_months: int = 12,
         force_refresh: bool = False,
     ) -> list[dict[str, Any]]:
@@ -264,11 +265,12 @@ class XeroDataOrchestrator:
         
         Args:
             organization_id: Organization UUID
+            account_map: AccountID → AccountInfo mapping for P&L extraction
             num_months: Number of months to fetch (default 12)
             force_refresh: If True, bypass cache and fetch all months
             
         Returns:
-            List of monthly P&L data, sorted newest to oldest
+            List of monthly P&L data with extracted totals, sorted newest to oldest
         """
         cached_month_keys: set[str] = set()
         cached_data: dict[str, dict[str, Any]] = {}
@@ -290,21 +292,22 @@ class XeroDataOrchestrator:
             cached_months=cached_month_keys if not force_refresh else None,
         )
         
-        # Save newly fetched data to cache
+        # Save newly fetched data to cache (with extracted P&L totals)
         if fetched_data and self.cache_service:
             await self.cache_service.save_monthly_pnl_cache(
-                organization_id, fetched_data
+                organization_id, fetched_data, account_map
             )
         
         # Merge cached and fetched data
         # Fetched data takes priority (it's fresher)
         all_data = {}
         
-        # Add cached data first
+        # Add cached data first (already has extracted totals from cache)
         for month_key, data in cached_data.items():
             all_data[month_key] = data
         
         # Override with freshly fetched data
+        # Include raw_data so downstream extraction still works
         for entry in fetched_data:
             if "error" not in entry:
                 all_data[entry["month_key"]] = {
@@ -312,7 +315,8 @@ class XeroDataOrchestrator:
                     "year": entry["year"],
                     "month": entry["month"],
                     "raw_data": entry.get("data", {}),
-                    # P&L totals will be extracted later by Extractors
+                    # P&L totals will be extracted by Extractors.extract_monthly_pnl_totals()
+                    # Fresh data needs extraction; cached data already has values
                     "revenue": None,
                     "cost_of_sales": None,
                     "expenses": None,

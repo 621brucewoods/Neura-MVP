@@ -751,6 +751,10 @@ class Extractors:
         Takes the raw monthly P&L data from fetcher and extracts revenue,
         expenses, etc. using AccountType-based extraction.
         
+        Supports two data sources:
+        1. Fresh data with raw_data: Extracts P&L from raw Xero report
+        2. Cached data with pre-extracted values: Uses cached revenue/expenses directly
+        
         Args:
             monthly_pnl_data: List of monthly P&L data from fetch_monthly_pnl()
             account_map: AccountID → AccountInfo mapping
@@ -764,8 +768,38 @@ class Extractors:
             month_key = month_entry.get("month_key")
             raw_data = month_entry.get("raw_data", month_entry.get("data", {}))
             
+            # Check if we have pre-extracted values from cache
+            # Cache entries have revenue/expenses already extracted
+            cached_revenue = month_entry.get("revenue")
+            cached_expenses = month_entry.get("expenses")
+            
+            if cached_revenue is not None or cached_expenses is not None:
+                # Use pre-extracted values from cache
+                revenue = cached_revenue
+                cost_of_sales = month_entry.get("cost_of_sales")
+                expenses = cached_expenses
+                net_profit = month_entry.get("net_profit")
+                
+                # Calculate gross_profit if we have revenue and cogs
+                gross_profit = None
+                if revenue is not None and cost_of_sales is not None:
+                    gross_profit = revenue - cost_of_sales
+                
+                result.append({
+                    "month_key": month_key,
+                    "year": month_entry.get("year"),
+                    "month": month_entry.get("month"),
+                    "revenue": revenue,
+                    "cost_of_sales": cost_of_sales,
+                    "expenses": expenses,
+                    "gross_profit": gross_profit,
+                    "net_profit": net_profit,
+                    "has_data": revenue is not None,
+                })
+                continue
+            
             if not raw_data:
-                # No data for this month
+                # No data for this month (neither raw nor cached)
                 result.append({
                     "month_key": month_key,
                     "year": month_entry.get("year"),
@@ -779,7 +813,7 @@ class Extractors:
                 })
                 continue
             
-            # Extract P&L using AccountType-based extraction
+            # Extract P&L using AccountType-based extraction (fresh data)
             pnl = PnLExtractor.extract(raw_data, account_map)
             
             result.append({

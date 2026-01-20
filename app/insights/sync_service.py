@@ -110,16 +110,19 @@ class SyncService:
             # Fetch Monthly P&L (12 months for trends, health score, AI summary)
             await self._update_status(SyncStatus.IN_PROGRESS, SyncStep.CALCULATING)
             
+            # Get account map for P&L extraction (needed for both fetch and cache)
+            account_map = financial_data.get("account_type_map", {})
+            
             monthly_pnl_data = None
             try:
                 monthly_pnl_raw = await data_fetcher.orchestrator.fetch_monthly_pnl_with_cache(
                     organization_id=self.organization_id,
+                    account_map=account_map,  # Pass account_map for cache extraction
                     num_months=12,
                     force_refresh=force_refresh,
                 )
                 
                 # Extract P&L totals from monthly data
-                account_map = financial_data.get("account_type_map", {})
                 if monthly_pnl_raw and account_map:
                     monthly_pnl_data = Extractors.extract_monthly_pnl_totals(
                         monthly_pnl_raw,
