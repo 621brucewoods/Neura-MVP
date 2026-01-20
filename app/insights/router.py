@@ -382,11 +382,26 @@ async def get_insight_detail(
         if data_fetcher.session_manager:
             await data_fetcher.session_manager.commit_all()
         
-        # Calculate metrics
-        metrics = InsightsService.calculate_all_insights(financial_data)
+        # Fetch monthly P&L data for profitability calculations
+        monthly_pnl_data = None
+        try:
+            monthly_pnl_raw = await data_fetcher.orchestrator.fetch_monthly_pnl_with_cache(
+                organization_id=current_user.organization.id,
+                num_months=12,
+                force_refresh=False,
+            )
+            account_map = financial_data.get("account_type_map", {})
+            if monthly_pnl_raw and account_map:
+                from app.integrations.xero.extractors import Extractors
+                monthly_pnl_data = Extractors.extract_monthly_pnl_totals(monthly_pnl_raw, account_map)
+        except Exception:
+            pass  # Use None if fetch fails
+        
+        # Calculate metrics using monthly P&L data
+        metrics = InsightsService.calculate_all_insights(financial_data, monthly_pnl_data)
         
         # Create compact summary of raw data for AI analysis
-        raw_data_summary = DataSummarizer.summarize(financial_data, start_date, end_date, data_fetcher)
+        raw_data_summary = DataSummarizer.summarize(financial_data, start_date, end_date, monthly_pnl_data)
         
         # Generate all insights using AI
         insight_generator = InsightGenerator()

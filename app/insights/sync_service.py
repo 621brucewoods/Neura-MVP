@@ -101,14 +101,10 @@ class SyncService:
             if data_fetcher.session_manager:
                 await data_fetcher.session_manager.commit_all()
 
-            # 4. Calculate Metrics
+            # 4. Fetch Monthly P&L (used by ALL services: metrics, health score, AI summary)
             await self._update_status(SyncStatus.IN_PROGRESS, SyncStep.CALCULATING)
-            metrics = InsightsService.calculate_all_insights(financial_data)
-            raw_data_summary = DataSummarizer.summarize(financial_data, start_date, end_date, data_fetcher)
-
-            # 4.5 Fetch Monthly P&L and Calculate Health Score
-            # This uses the same fetched data + monthly historical P&L
-            health_score_payload = None
+            
+            monthly_pnl_data = None
             try:
                 # Fetch monthly P&L (uses batched fetching to avoid rate limits)
                 monthly_pnl_raw = await data_fetcher.orchestrator.fetch_monthly_pnl_with_cache(
@@ -119,30 +115,35 @@ class SyncService:
                 
                 # Extract P&L totals from monthly data
                 account_map = financial_data.get("account_type_map", {})
-                monthly_pnl_data = None
                 if monthly_pnl_raw and account_map:
                     monthly_pnl_data = Extractors.extract_monthly_pnl_totals(
                         monthly_pnl_raw,
                         account_map,
                     )
-                    logger.info(f"Extracted {len(monthly_pnl_data)} months of P&L for health score")
+                    logger.info(f"Extracted {len(monthly_pnl_data)} months of P&L data")
+            except Exception as e:
+                logger.warning(f"Failed to fetch monthly P&L: {e}")
+                monthly_pnl_data = None
+            
+            # 4.5 Calculate Metrics (using monthly P&L data)
+            metrics = InsightsService.calculate_all_insights(financial_data, monthly_pnl_data)
+            raw_data_summary = DataSummarizer.summarize(financial_data, start_date, end_date, monthly_pnl_data)
+
+            # 4.6 Calculate Health Score (using same monthly P&L data)
+            health_score_payload = None
+            try:
                 
                 # Prepare data for Health Score calculation
+                # Note: P&L data now comes from monthly_pnl_data (rolling 3-month)
+                # instead of trial_balance_pnl (YTD cumulative)
                 extracted = financial_data.get("extracted", {})
                 balance_sheet_totals = extracted.get("balance_sheet", {})
-                pnl_data = extracted.get("pnl", {})
-                trial_balance_pnl = {
-                    "revenue": pnl_data.get("revenue"),
-                    "cost_of_sales": pnl_data.get("cost_of_sales"),
-                    "expenses": pnl_data.get("expenses"),
-                }
                 invoices_receivable = financial_data.get("invoices_receivable", {})
                 invoices_payable = financial_data.get("invoices_payable", {})
                 
-                # Calculate Health Score
+                # Calculate Health Score using monthly P&L data
                 health_score = HealthScoreCalculator.calculate(
                     balance_sheet_totals=balance_sheet_totals,
-                    trial_balance_pnl=trial_balance_pnl,
                     invoices_receivable=invoices_receivable,
                     invoices_payable=invoices_payable,
                     monthly_pnl_data=monthly_pnl_data,

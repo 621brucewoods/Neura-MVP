@@ -124,6 +124,55 @@ Insights include confidence levels and data notes that indicate calculation reli
 
 **System Scope**: The system provides financial analysis tools and insights but does not replace professional financial advice. Insights should be considered alongside business knowledge and professional consultation when appropriate.
 
+## Business Health Score (BHS) Calculation
+
+The Business Health Score is a comprehensive 0-100 score that evaluates financial health across five categories:
+
+**Category A: Cash & Runway (30 points)**
+- A1: Runway Months (15 pts) - Cash available divided by average monthly net outflow
+- A2: Cash Volatility (10 pts) - Standard deviation of monthly net cash proxy / average revenue
+- A3: Cash Conversion Buffer (5 pts) - AR to Cash ratio
+
+**Category B: Profitability & Efficiency (25 points)**
+- B1: Net Profit Margin (10 pts) - Net profit / revenue (rolling 3-month)
+- B2: Gross Margin (8 pts) - (Revenue - COGS) / revenue (rolling 3-month)
+- B3: Operating Expense Load (7 pts) - Operating expenses / revenue (rolling 3-month)
+
+**Category C: Revenue Quality & Momentum (15 points)**
+- C1: Revenue Trend (10 pts) - Compares last 3 months vs prior 3 months revenue
+- C2: Revenue Consistency (5 pts) - Coefficient of variation of 6-month revenue
+
+**Category D: Working Capital & Liquidity (20 points)**
+- D1: Current Ratio (8 pts) - Current assets / current liabilities
+- D2: Quick Ratio (5 pts) - (Cash + AR) / current liabilities
+- D3: Receivables Health (4 pts) - AR ageing analysis (>30 days, >60 days)
+- D4: Payables Pressure (3 pts) - AP ageing analysis (>60 days)
+
+**Category E: Compliance & Data Confidence (10 points)**
+- E3: Data Completeness (10 pts) - Checks for P&L, Balance Sheet, AR, AP, and historical data availability
+
+**Data Source Architecture:**
+The Health Score uses **Monthly P&L reports** (not Trial Balance) for revenue, expenses, and COGS metrics. This is because:
+1. Monthly P&L reports provide **period activity** (actual revenue/expenses for that month)
+2. Trial Balance provides **cumulative YTD balances** (which can be 0 at financial year start)
+3. The BHS spec requires "rolling 3-month" calculations, which aligns with monthly P&L data
+
+The extraction uses deterministic AccountType-based summing:
+- `REVENUE`, `SALES`, `OTHERINCOME` → revenue
+- `COGS`, `DIRECTCOSTS` → cost_of_sales
+- `EXPENSE`, `OVERHEADS` → expenses
+
+This approach works consistently across all organizations regardless of account naming conventions.
+
+**Confidence and Grading:**
+- Grade A (Strong): 80-100 points
+- Grade B (Stable): 65-79 points
+- Grade C (At Risk): 45-64 points
+- Grade D (Critical): <45 points
+
+Confidence is determined by Category E score: High (≥8), Medium (5-7), Low (≤4).
+A confidence cap is applied: High→100, Medium→90, Low→80.
+
 ## Planned Enhancements
 
 The system architecture supports extensibility, and several enhancements are planned for future versions.

@@ -409,7 +409,6 @@ class HealthScoreCalculator:
     @staticmethod
     def calculate(
         balance_sheet_totals: dict[str, Optional[float]],
-        trial_balance_pnl: dict[str, Optional[float]],
         invoices_receivable: dict[str, Any],
         invoices_payable: dict[str, Any],
         monthly_pnl_data: Optional[list[dict[str, Any]]] = None,
@@ -418,12 +417,16 @@ class HealthScoreCalculator:
         Calculate Business Health Score v1.
         
         Args:
-            balance_sheet_totals: From BalanceSheetAccountTypeParser.extract_totals()
-            trial_balance_pnl: From TrialBalanceParser.extract_pnl()
+            balance_sheet_totals: From BalanceSheetExtractor.extract()
             invoices_receivable: From InvoicesFetcher.fetch_receivables()
             invoices_payable: From InvoicesFetcher.fetch_payables()
-            monthly_pnl_data: Optional list of monthly P&L data (newest first) with
-                              keys: month_key, revenue, expenses, net_profit
+            monthly_pnl_data: List of monthly P&L data (newest first) with
+                              keys: month_key, revenue, cost_of_sales, expenses, net_profit
+                              
+        Note:
+            P&L metrics (revenue, expenses, COGS) are derived from monthly_pnl_data
+            using a rolling 3-month sum, as per BHS spec. This replaces the previous
+            trial_balance_pnl parameter which provided YTD cumulative values.
         
         Returns:
             Complete Health Score result including score, grade, confidence,
@@ -432,35 +435,51 @@ class HealthScoreCalculator:
         sub_scores: dict[str, SubScore] = {}
         missing_adjustments: list[dict] = []
         
-        # Extract values from inputs
+        # Extract values from Balance Sheet
         cash = balance_sheet_totals.get("cash")
         ar = balance_sheet_totals.get("accounts_receivable")
         current_assets = balance_sheet_totals.get("current_assets_total")
         current_liabilities = balance_sheet_totals.get("current_liabilities_total")
         
-        revenue = trial_balance_pnl.get("revenue")
-        cost_of_sales = trial_balance_pnl.get("cost_of_sales")
-        expenses = trial_balance_pnl.get("expenses")
-        
-        # Process monthly P&L data for historical metrics
+        # Process monthly P&L data
         monthly_pnl = monthly_pnl_data or []
         has_monthly_data = len(monthly_pnl) >= 3  # Need at least 3 months
         has_6_months = len(monthly_pnl) >= 6
         
-        # Extract monthly revenue/expenses lists (newest first)
+        # Extract monthly values lists (newest first)
+        # Include 0 values (valid data), exclude None (no data)
         monthly_revenues = []
+        monthly_cogs = []
         monthly_expenses = []
         monthly_net_cash_proxy = []  # Revenue - Expenses (cash proxy)
         
         for month in monthly_pnl:
             rev = month.get("revenue")
+            cogs = month.get("cost_of_sales")
             exp = month.get("expenses")
+            # Include 0 values - they are valid data points
             if rev is not None:
                 monthly_revenues.append(float(rev))
+            if cogs is not None:
+                monthly_cogs.append(float(cogs))
             if exp is not None:
                 monthly_expenses.append(float(exp))
             if rev is not None and exp is not None:
                 monthly_net_cash_proxy.append(float(rev) - float(exp))
+        
+        # Calculate rolling 3-month P&L totals (as per BHS spec)
+        # Use available data even if less than 3 months
+        revenue: Optional[float] = None
+        cost_of_sales: Optional[float] = None
+        expenses: Optional[float] = None
+        
+        if monthly_revenues:
+            # Sum up to 3 months of available data
+            revenue = sum(monthly_revenues[:3])
+        if monthly_cogs:
+            cost_of_sales = sum(monthly_cogs[:3])
+        if monthly_expenses:
+            expenses = sum(monthly_expenses[:3])
         
         # Calculate intermediate values
         gross_profit = None
@@ -508,19 +527,26 @@ class HealthScoreCalculator:
         ar_over_60_pct = ar_buckets["days_61_90"] + ar_buckets["days_90_plus"]
         ap_over_60_pct = ap_buckets["days_61_90"] + ap_buckets["days_90_plus"]
         
-        # Calculate runway (simplified - using current month data)
-        # Runway = Cash / AvgMonthlyNetOutflow
-        # For now, use single month approximation
+        # Calculate runway using average monthly outflow from P&L data
+        # Runway = Cash / AvgMonthlyNetOutflow (per BHS spec)
         runway_months = None
         monthly_burn = None
-        if cash is not None and expenses is not None and revenue is not None:
-            monthly_outflow = max(0, expenses - revenue)  # Net outflow
-            if monthly_outflow > 0:
-                runway_months = cash / monthly_outflow
-                monthly_burn = monthly_outflow
-            elif revenue > expenses:
-                # Profitable - infinite runway
-                runway_months = None  # Infinite
+        avg_monthly_revenue = None
+        avg_monthly_expenses = None
+        
+        if has_monthly_data and len(monthly_revenues) >= 3 and len(monthly_expenses) >= 3:
+            # Use average of last 3 months for burn rate calculation
+            avg_monthly_revenue = sum(monthly_revenues[:3]) / 3
+            avg_monthly_expenses = sum(monthly_expenses[:3]) / 3
+            monthly_outflow = max(0, avg_monthly_expenses - avg_monthly_revenue)
+            
+            if cash is not None:
+                if monthly_outflow > 0:
+                    runway_months = cash / monthly_outflow
+                    monthly_burn = monthly_outflow
+                elif avg_monthly_revenue > avg_monthly_expenses:
+                    # Profitable - infinite runway (use large number for scoring)
+                    runway_months = 999  # Effectively infinite
         
         # =====================
         # CATEGORY A: Cash & Runway (30 points)
@@ -528,15 +554,19 @@ class HealthScoreCalculator:
         
         # A1: Runway months (15 pts)
         a1_points, a1_threshold = HealthScoreCalculator._score_runway_months(runway_months)
+        a1_status = MetricStatus.OK if runway_months is not None else MetricStatus.MISSING
+        if not has_monthly_data:
+            a1_status = MetricStatus.MISSING
+        
         sub_scores["A1"] = SubScore(
             metric_id="A1",
             name="Runway Months",
             max_points=15,
             points_awarded=a1_points,
-            status=MetricStatus.OK if runway_months is not None or (revenue and revenue > (expenses or 0)) else MetricStatus.MISSING,
-            value=runway_months,
-            formula="CashAvailable / AvgMonthlyNetOutflow",
-            inputs_used=["balance_sheet_totals.cash", "trial_balance_pnl.expenses", "trial_balance_pnl.revenue"]
+            status=a1_status,
+            value=runway_months if runway_months != 999 else None,  # Don't show 999 in output
+            formula="CashAvailable / AvgMonthlyNetOutflow (3mo avg)",
+            inputs_used=["balance_sheet_totals.cash", "monthly_pnl_data"]
         )
         
         # A2: Cash volatility (10 pts) - uses monthly data if available
@@ -598,44 +628,54 @@ class HealthScoreCalculator:
         # CATEGORY B: Profitability & Efficiency (25 points)
         # =====================
         
-        # B1: Net profit margin (10 pts)
+        # B1: Net profit margin (10 pts) - uses rolling 3-month P&L
         b1_points, b1_threshold = HealthScoreCalculator._score_net_margin(net_margin_pct)
+        b1_status = MetricStatus.OK if net_margin_pct is not None else MetricStatus.MISSING
+        if not has_monthly_data:
+            b1_status = MetricStatus.MISSING
+        
         sub_scores["B1"] = SubScore(
             metric_id="B1",
             name="Net Profit Margin",
             max_points=10,
-            points_awarded=b1_points,
-            status=MetricStatus.OK if net_margin_pct is not None else MetricStatus.MISSING,
+            points_awarded=b1_points if b1_status == MetricStatus.OK else 0,
+            status=b1_status,
             value=net_margin_pct,
-            formula="NetProfit / Revenue * 100",
-            inputs_used=["trial_balance_pnl.revenue", "trial_balance_pnl.cost_of_sales", "trial_balance_pnl.expenses"]
+            formula="NetProfit / Revenue * 100 (3mo rolling)",
+            inputs_used=["monthly_pnl_data"] if has_monthly_data else []
         )
         
-        # B2: Gross margin (8 pts)
+        # B2: Gross margin (8 pts) - uses rolling 3-month P&L
         b2_points, b2_threshold = HealthScoreCalculator._score_gross_margin(gross_margin_pct)
         has_cogs = cost_of_sales is not None and cost_of_sales != 0
+        b2_status = MetricStatus.OK if (has_cogs and has_monthly_data) else MetricStatus.MISSING
+        
         sub_scores["B2"] = SubScore(
             metric_id="B2",
             name="Gross Margin",
             max_points=8,
-            points_awarded=b2_points if has_cogs else 0,
-            status=MetricStatus.OK if has_cogs else MetricStatus.MISSING,
+            points_awarded=b2_points if b2_status == MetricStatus.OK else 0,
+            status=b2_status,
             value=gross_margin_pct if has_cogs else None,
-            formula="(Revenue - COGS) / Revenue * 100",
-            inputs_used=["trial_balance_pnl.revenue", "trial_balance_pnl.cost_of_sales"]
+            formula="(Revenue - COGS) / Revenue * 100 (3mo rolling)",
+            inputs_used=["monthly_pnl_data"] if has_monthly_data else []
         )
         
-        # B3: Operating expense ratio (7 pts)
+        # B3: Operating expense ratio (7 pts) - uses rolling 3-month P&L
         b3_points, b3_threshold = HealthScoreCalculator._score_opex_ratio(opex_ratio_pct)
+        b3_status = MetricStatus.OK if opex_ratio_pct is not None else MetricStatus.MISSING
+        if not has_monthly_data:
+            b3_status = MetricStatus.MISSING
+        
         sub_scores["B3"] = SubScore(
             metric_id="B3",
             name="Operating Expense Load",
             max_points=7,
-            points_awarded=b3_points,
-            status=MetricStatus.OK if opex_ratio_pct is not None else MetricStatus.MISSING,
+            points_awarded=b3_points if b3_status == MetricStatus.OK else 0,
+            status=b3_status,
             value=opex_ratio_pct,
-            formula="OperatingExpenses / Revenue * 100",
-            inputs_used=["trial_balance_pnl.expenses", "trial_balance_pnl.revenue"]
+            formula="OperatingExpenses / Revenue * 100 (3mo rolling)",
+            inputs_used=["monthly_pnl_data"] if has_monthly_data else []
         )
         
         # If B2 missing (no COGS), redistribute to B3
@@ -833,8 +873,8 @@ class HealthScoreCalculator:
         e3_checks = 0
         e3_max_checks = 5  # Total checks we perform
         
-        # Check 1: P&L/Trial Balance data available
-        if trial_balance_pnl.get("revenue") is not None or trial_balance_pnl.get("expenses") is not None:
+        # Check 1: Monthly P&L data available (at least 3 months)
+        if has_monthly_data:
             e3_checks += 1
         
         # Check 2: Balance Sheet data available
@@ -849,8 +889,8 @@ class HealthScoreCalculator:
         if ap_invoices or invoices_payable.get("total", 0) > 0:
             e3_checks += 1
         
-        # Check 5: Historical monthly P&L available (for trend analysis)
-        if has_monthly_data:
+        # Check 5: 6+ months of P&L for trend analysis
+        if has_6_months:
             e3_checks += 1
         
         # Scale to 10 points (full category)
@@ -863,8 +903,8 @@ class HealthScoreCalculator:
             points_awarded=e3_points,
             status=MetricStatus.OK,
             value=e3_checks,
-            formula=f"Data availability checks: {e3_checks}/{e3_max_checks} (P&L, BS, AR, AP, Historical)",
-            inputs_used=["trial_balance_pnl", "balance_sheet_totals", "invoices_receivable", "invoices_payable", "monthly_pnl_data"]
+            formula=f"Data availability checks: {e3_checks}/{e3_max_checks} (P&L 3mo, BS, AR, AP, P&L 6mo)",
+            inputs_used=["monthly_pnl_data", "balance_sheet_totals", "invoices_receivable", "invoices_payable"]
         )
         
         category_e_points = e3_points
@@ -1019,9 +1059,11 @@ class HealthScoreCalculator:
                 "accounts_receivable": ar,
                 "current_assets_total": current_assets,
                 "current_liabilities_total": current_liabilities,
-                "revenue": revenue,
-                "cost_of_sales": cost_of_sales,
-                "expenses": expenses,
+                "revenue_3mo": revenue,  # Rolling 3-month total
+                "cost_of_sales_3mo": cost_of_sales,  # Rolling 3-month total
+                "expenses_3mo": expenses,  # Rolling 3-month total
+                "avg_monthly_revenue": avg_monthly_revenue,
+                "avg_monthly_expenses": avg_monthly_expenses,
                 "gross_profit": gross_profit,
                 "net_profit": net_profit,
                 "net_margin_pct": net_margin_pct,
@@ -1030,7 +1072,8 @@ class HealthScoreCalculator:
                 "current_ratio": current_ratio,
                 "quick_ratio": quick_ratio,
                 "ar_to_cash": ar_to_cash,
-                "runway_months": runway_months,
+                "runway_months": runway_months if runway_months != 999 else None,
+                "months_of_pnl_data": len(monthly_pnl),
                 "ar_over_30_pct": ar_over_30_pct,
                 "ar_over_60_pct": ar_over_60_pct,
                 "ap_over_60_pct": ap_over_60_pct,
@@ -1040,6 +1083,7 @@ class HealthScoreCalculator:
     @staticmethod
     def calculate_from_extracted(
         extracted_data: "FinancialData",
+        monthly_pnl_data: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         """
         Calculate Business Health Score from Extractors module output.
@@ -1049,12 +1093,12 @@ class HealthScoreCalculator:
         
         Args:
             extracted_data: FinancialData from Extractors.extract_all()
+            monthly_pnl_data: List of monthly P&L data (newest first)
         
         Returns:
             Complete Health Score result
         """
         balance_sheet = extracted_data.get("balance_sheet", {})
-        pnl = extracted_data.get("pnl", {})
         ar_ageing = extracted_data.get("ar_ageing", {})
         ap_ageing = extracted_data.get("ap_ageing", {})
         
@@ -1066,12 +1110,6 @@ class HealthScoreCalculator:
             "current_liabilities_total": balance_sheet.get("current_liabilities_total"),
             "accounts_payable": balance_sheet.get("accounts_payable"),
             "inventory": balance_sheet.get("inventory"),
-        }
-        
-        trial_balance_pnl = {
-            "revenue": pnl.get("revenue"),
-            "cost_of_sales": pnl.get("cost_of_sales"),
-            "expenses": pnl.get("expenses"),
         }
         
         # Convert ageing to invoices format expected by calculate()
@@ -1088,7 +1126,7 @@ class HealthScoreCalculator:
         
         return HealthScoreCalculator.calculate(
             balance_sheet_totals=balance_sheet_totals,
-            trial_balance_pnl=trial_balance_pnl,
             invoices_receivable=invoices_receivable,
             invoices_payable=invoices_payable,
+            monthly_pnl_data=monthly_pnl_data,
         )

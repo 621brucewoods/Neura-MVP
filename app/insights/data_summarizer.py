@@ -2,7 +2,7 @@
 Data Summarizer
 Creates compact summaries of raw financial data for AI analysis.
 
-Uses the Extractors module for reliable data extraction.
+Uses Monthly P&L data for profitability (not Trial Balance).
 """
 
 from typing import Any, Optional
@@ -111,13 +111,53 @@ class DataSummarizer:
                 counts["currliab"] += 1
         
         return counts
+    
+    @staticmethod
+    def _aggregate_monthly_pnl(
+        monthly_pnl_data: Optional[list[dict[str, Any]]],
+        num_months: int = 3
+    ) -> dict[str, Optional[float]]:
+        """
+        Aggregate monthly P&L data into rolling totals.
+        
+        Args:
+            monthly_pnl_data: List of monthly P&L (newest first)
+            num_months: Number of months to aggregate (default 3)
+            
+        Returns:
+            Dict with revenue, cost_of_sales, expenses (rolling sum)
+        """
+        if not monthly_pnl_data:
+            return {"revenue": None, "cost_of_sales": None, "expenses": None}
+        
+        revenues = []
+        cogs_list = []
+        expenses_list = []
+        
+        for month in monthly_pnl_data[:num_months]:
+            rev = month.get("revenue")
+            cogs = month.get("cost_of_sales")
+            exp = month.get("expenses")
+            
+            if rev is not None:
+                revenues.append(float(rev))
+            if cogs is not None:
+                cogs_list.append(float(cogs))
+            if exp is not None:
+                expenses_list.append(float(exp))
+        
+        return {
+            "revenue": sum(revenues) if revenues else None,
+            "cost_of_sales": sum(cogs_list) if cogs_list else None,
+            "expenses": sum(expenses_list) if expenses_list else None,
+        }
 
     @staticmethod
     def summarize(
         financial_data: dict[str, Any],
         start_date: date,
         end_date: date,
-        fetcher: Any = None  # Kept for backward compatibility, not used
+        monthly_pnl_data: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         """
         Create compact summary of raw financial data for AI analysis.
@@ -126,7 +166,7 @@ class DataSummarizer:
             financial_data: Complete data from XeroDataFetcher.fetch_all_data()
             start_date: Period start date
             end_date: Period end date
-            fetcher: Deprecated, not used
+            monthly_pnl_data: Monthly P&L data for profitability (newest first)
         
         Returns:
             Compact summary for AI analysis
@@ -137,36 +177,21 @@ class DataSummarizer:
         balance_sheet_current = financial_data.get("balance_sheet_current", {})
         balance_sheet_prior = financial_data.get("balance_sheet_prior", {})
         profit_loss = financial_data.get("profit_loss", {})
-        trial_balance = financial_data.get("trial_balance", {})
         
-        # Use extracted data (from Extractors module)
+        # Use extracted data for balance sheet
         extracted = financial_data.get("extracted")
         if extracted:
             bs_data = extracted.get("balance_sheet", {})
-            pnl_data = extracted.get("pnl", {})
             cash_current = bs_data.get("cash")
-            trial_balance_pnl = {
-                "revenue": pnl_data.get("revenue"),
-                "cost_of_sales": pnl_data.get("cost_of_sales"),
-                "expenses": pnl_data.get("expenses"),
-            }
         else:
-            # Extract if not pre-extracted
             if account_type_map and balance_sheet_current:
                 bs_data = Extractors.extract_balance_sheet(balance_sheet_current, account_type_map)
                 cash_current = bs_data.get("cash")
             else:
                 cash_current = None
-            
-            if account_type_map and trial_balance:
-                pnl_data = Extractors.extract_pnl(trial_balance, account_type_map)
-                trial_balance_pnl = {
-                    "revenue": pnl_data.get("revenue"),
-                    "cost_of_sales": pnl_data.get("cost_of_sales"),
-                    "expenses": pnl_data.get("expenses"),
-                }
-            else:
-                trial_balance_pnl = financial_data.get("trial_balance_pnl", {})
+        
+        # Get P&L from monthly data (rolling 3-month sum)
+        pnl_aggregated = DataSummarizer._aggregate_monthly_pnl(monthly_pnl_data, num_months=3)
         
         # Extract prior period cash
         cash_prior = None
@@ -191,11 +216,10 @@ class DataSummarizer:
             "balance_sheet_current": DataSummarizer._extract_report_structure(balance_sheet_current),
             "balance_sheet_prior": DataSummarizer._extract_report_structure(balance_sheet_prior),
             "profit_loss": DataSummarizer._extract_report_structure(profit_loss),
-            "trial_balance": DataSummarizer._extract_report_structure(trial_balance),
             "profitability": {
-                "revenue": trial_balance_pnl.get("revenue") if trial_balance_pnl else None,
-                "cost_of_sales": trial_balance_pnl.get("cost_of_sales") if trial_balance_pnl else None,
-                "expenses": trial_balance_pnl.get("expenses") if trial_balance_pnl else None,
+                "revenue": pnl_aggregated.get("revenue"),
+                "cost_of_sales": pnl_aggregated.get("cost_of_sales"),
+                "expenses": pnl_aggregated.get("expenses"),
             },
             "receivables": {
                 "total": receivables.get("total", 0.0),
