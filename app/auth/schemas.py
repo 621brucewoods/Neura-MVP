@@ -75,6 +75,7 @@ class UserWithOrgResponse(BaseModel):
     created_at: datetime = Field(..., description="Account creation timestamp")
     organization_id: UUID | None = Field(None, description="Organization ID")
     organization_name: str | None = Field(None, description="Organization name")
+    role: str = Field(default="user", description="User role (user or admin)")
     
     model_config = {"from_attributes": True}
 

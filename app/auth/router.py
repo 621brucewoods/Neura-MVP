@@ -40,4 +40,5 @@ async def get_me(
         created_at=current_user.created_at,
         organization_id=current_user.organization.id if current_user.organization else None,
         organization_name=current_user.organization.name if current_user.organization else None,
+        role=current_user.role.value if current_user.role else "user",
     )
