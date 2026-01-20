@@ -134,8 +134,7 @@ class SyncService:
             try:
                 
                 # Prepare data for Health Score calculation
-                # Note: P&L data now comes from monthly_pnl_data (rolling 3-month)
-                # instead of trial_balance_pnl (YTD cumulative)
+                # P&L data comes from monthly_pnl_data (rolling 3-month)
                 extracted = financial_data.get("extracted", {})
                 balance_sheet_totals = extracted.get("balance_sheet", {})
                 invoices_receivable = financial_data.get("invoices_receivable", {})

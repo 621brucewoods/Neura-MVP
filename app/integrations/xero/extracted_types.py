@@ -21,6 +21,21 @@ class BalanceSheetData(TypedDict):
     
     All values in organization's base currency.
     None means the value could not be extracted.
+    
+    Handles ALL Xero AccountTypes:
+    - BANK → cash
+    - CURRENT + DEBTORS → accounts_receivable  
+    - CURRENT (other) → other_current_assets
+    - INVENTORY → inventory
+    - PREPAYMENT → prepayments
+    - FIXED → fixed_assets
+    - NONCURRENT → non_current_assets
+    - DEPRECIATN → accumulated_depreciation (contra-asset)
+    - CURRLIAB + CREDITORS → accounts_payable
+    - CURRLIAB (other) → other_current_liabilities
+    - LIABILITY → long_term_liabilities
+    - TERMLIAB → long_term_liabilities
+    - EQUITY → equity
     """
     # Cash & Bank
     cash: Optional[float]  # Sum of all BANK accounts
@@ -28,16 +43,27 @@ class BalanceSheetData(TypedDict):
     # Current Assets
     accounts_receivable: Optional[float]  # CURRENT + SystemAccount=DEBTORS
     other_current_assets: Optional[float]  # CURRENT without DEBTORS
-    current_assets_total: Optional[float]  # BANK + all CURRENT
-    inventory: Optional[float]  # Typically part of other_current_assets
+    inventory: Optional[float]  # INVENTORY accounts
+    prepayments: Optional[float]  # PREPAYMENT accounts
+    current_assets_total: Optional[float]  # cash + AR + other_current + inventory + prepayments
     
-    # Fixed Assets
+    # Non-Current Assets
     fixed_assets: Optional[float]  # Sum of FIXED accounts
+    non_current_assets: Optional[float]  # NONCURRENT accounts
+    accumulated_depreciation: Optional[float]  # DEPRECIATN accounts (typically negative)
+    total_assets: Optional[float]  # current_assets + fixed + non_current + depreciation
     
     # Current Liabilities
     accounts_payable: Optional[float]  # CURRLIAB + SystemAccount=CREDITORS
     other_current_liabilities: Optional[float]  # CURRLIAB without CREDITORS
     current_liabilities_total: Optional[float]  # Sum of all CURRLIAB
+    
+    # Non-Current Liabilities
+    long_term_liabilities: Optional[float]  # LIABILITY + TERMLIAB accounts
+    total_liabilities: Optional[float]  # current_liabilities + long_term
+    
+    # Equity
+    equity: Optional[float]  # EQUITY accounts
 
 
 class PnLData(TypedDict):

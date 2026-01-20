@@ -2,7 +2,12 @@
 Xero Data Orchestrator
 Coordinates parallel fetching of all Xero financial data.
 
-Uses the new Extractors module for all data extraction (single source of truth).
+Uses the Extractors module for all data extraction (single source of truth).
+
+Data Flow:
+- Balance Sheet data: Fetched here, extracted by Extractors
+- P&L data: Fetched via fetch_monthly_pnl_with_cache(), extracted by Extractors
+- AR/AP data: Fetched here, extracted by Extractors
 """
 
 import asyncio
@@ -18,7 +23,6 @@ from app.integrations.xero.fetchers.accounts import AccountsFetcher
 from app.integrations.xero.fetchers.balance_sheet import BalanceSheetFetcher
 from app.integrations.xero.fetchers.invoices import InvoicesFetcher
 from app.integrations.xero.fetchers.profit_loss import ProfitLossFetcher
-from app.integrations.xero.fetchers.trial_balance import TrialBalanceFetcher
 from app.integrations.xero.sdk_client import XeroSDKClient
 from app.integrations.xero.session_manager import XeroSessionManager
 
@@ -30,8 +34,11 @@ class XeroDataOrchestrator:
     Orchestrates fetching of all required financial data with parallelization.
     
     Strategy:
-    - Group 1 (parallel): Balance Sheets, P&L, Accounts (all independent)
-    - Group 2 (parallel): Trial Balance, Receivables, Payables (after Accounts)
+    - Group 1 (parallel): Balance Sheets (current + prior), Accounts
+    - Group 2 (parallel): Receivables, Payables
+    
+    Note: P&L data is fetched separately via fetch_monthly_pnl_with_cache()
+    to get monthly breakdowns for trend analysis.
     """
     
     def __init__(
@@ -56,7 +63,6 @@ class XeroDataOrchestrator:
         self.balance_sheet_fetcher = BalanceSheetFetcher(sdk_client, session_manager)
         self.profit_loss_fetcher = ProfitLossFetcher(sdk_client, session_manager)
         self.accounts_fetcher = AccountsFetcher(sdk_client, session_manager)
-        self.trial_balance_fetcher = TrialBalanceFetcher(sdk_client, session_manager)
         self.invoices_fetcher = InvoicesFetcher(sdk_client, session_manager)
     
     async def _fetch_balance_sheet_with_error_handling(
@@ -71,48 +77,6 @@ class XeroDataOrchestrator:
             logger.warning(error_msg)
             return {}, error_msg
     
-    async def _fetch_profit_loss_with_cache(
-        self,
-        organization_id: Optional[UUID],
-        start_date: date,
-        end_date: date,
-        force_refresh: bool,
-    ) -> tuple[dict[str, Any], Optional[str]]:
-        """Fetch P&L with cache logic."""
-        try:
-            if not force_refresh and self.cache_service:
-                cached_pnl = await self.cache_service.get_cached_profit_loss(
-                    organization_id, start_date, end_date
-                )
-                if cached_pnl:
-                    logger.info(
-                        "Using cached P&L for period: %s to %s",
-                        start_date,
-                        end_date
-                    )
-                    return cached_pnl, None
-            
-            profit_loss = await self.profit_loss_fetcher.fetch(
-                start_date=start_date,
-                end_date=end_date
-            )
-            
-            if self.cache_service and not force_refresh:
-                await self.cache_service.save_profit_loss_cache(
-                    organization_id, start_date, end_date, profit_loss
-                )
-            
-            logger.info(
-                "Fetched P&L for period: %s to %s",
-                start_date,
-                end_date
-            )
-            return profit_loss, None
-        except XeroDataFetchError as e:
-            error_msg = f"Profit & Loss: {e.message}"
-            logger.warning(error_msg)
-            return {}, error_msg
-    
     async def _fetch_accounts_with_error_handling(
         self,
     ) -> tuple[dict[str, str], Optional[str]]:
@@ -122,19 +86,6 @@ class XeroDataOrchestrator:
             return accounts_map, None
         except XeroDataFetchError as e:
             error_msg = f"Accounts: {e.message}"
-            logger.warning(error_msg)
-            return {}, error_msg
-    
-    async def _fetch_trial_balance_with_error_handling(
-        self,
-        end_date: date,
-    ) -> tuple[dict[str, Any], Optional[str]]:
-        """Fetch trial balance with error handling (extraction done later)."""
-        try:
-            trial_balance = await self.trial_balance_fetcher.fetch(end_date)
-            return trial_balance, None
-        except XeroDataFetchError as e:
-            error_msg = f"Trial Balance: {e.message}"
             logger.warning(error_msg)
             return {}, error_msg
     
@@ -187,17 +138,20 @@ class XeroDataOrchestrator:
         Orchestrates fetching of all required financial data with parallelization.
         
         Strategy:
-        - Group 1 (parallel): Balance Sheets, P&L, Accounts (all independent)
-        - Group 2 (parallel): Trial Balance, Receivables, Payables (after Accounts)
+        - Group 1 (parallel): Balance Sheets (current + prior), Accounts
+        - Group 2 (parallel): Receivables, Payables
+        
+        Note: P&L data should be fetched separately via fetch_monthly_pnl_with_cache()
+        to get monthly breakdowns for trend analysis and health score calculations.
         
         Args:
             organization_id: Organization UUID
-            start_date: P&L period start date
-            end_date: P&L period end date
+            start_date: Period start date (for metadata)
+            end_date: Period end date (Balance Sheet date)
             force_refresh: If True, bypass cache and fetch fresh data
         
         Returns:
-            Complete financial data structure
+            Complete financial data structure (excluding P&L - use monthly P&L)
         """
         try:
             errors = []
@@ -214,14 +168,10 @@ class XeroDataOrchestrator:
             (
                 (balance_sheet_current, error_current),
                 (balance_sheet_prior, error_prior),
-                (profit_loss, error_pnl),
                 (accounts_map, error_accounts),
             ) = await asyncio.gather(
                 self._fetch_balance_sheet_with_error_handling(end_date, "current"),
                 self._fetch_balance_sheet_with_error_handling(prior_date, "prior"),
-                self._fetch_profit_loss_with_cache(
-                    organization_id, start_date, end_date, force_refresh
-                ),
                 self._fetch_accounts_with_error_handling(),
             )
             
@@ -229,24 +179,18 @@ class XeroDataOrchestrator:
                 errors.append(error_current)
             if error_prior:
                 errors.append(error_prior)
-            if error_pnl:
-                errors.append(error_pnl)
             if error_accounts:
                 errors.append(error_accounts)
             
-            # Group 2: Fetch dependent data in parallel (after Accounts is available)
+            # Group 2: Fetch receivables/payables in parallel
             (
-                (trial_balance, error_trial),
                 (receivables_raw, error_receivables),
                 (payables_raw, error_payables),
             ) = await asyncio.gather(
-                self._fetch_trial_balance_with_error_handling(end_date),
                 self._fetch_receivables_with_error_handling(),
                 self._fetch_payables_with_error_handling(),
             )
             
-            if error_trial:
-                errors.append(error_trial)
             if error_receivables:
                 errors.append(error_receivables)
             if error_payables:
@@ -256,13 +200,13 @@ class XeroDataOrchestrator:
                 logger.warning("Some data fetch operations failed: %s", ", ".join(errors))
             
             # =================================================================
-            # EXTRACTION: Use new Extractors module (single source of truth)
+            # EXTRACTION: Use Extractors module (single source of truth)
             # =================================================================
             
-            # Extract all data using the clean extraction layer
+            # Extract Balance Sheet and AR/AP data
+            # Note: P&L is extracted from monthly data via extract_monthly_pnl_totals()
             extracted = Extractors.extract_all(
                 balance_sheet_raw=balance_sheet_current,
-                trial_balance_raw=trial_balance,
                 invoices_receivable=receivables_raw,
                 invoices_payable=payables_raw,
                 account_map=accounts_map,
@@ -273,37 +217,32 @@ class XeroDataOrchestrator:
             
             # Log extraction summary
             bs = extracted["balance_sheet"]
-            pnl = extracted["pnl"]
             logger.info(
-                "Extraction complete: cash=%.2f, AR=%.2f, AP=%.2f, revenue=%.2f, expenses=%.2f",
+                "Extraction complete: cash=%.2f, AR=%.2f, AP=%.2f, "
+                "inventory=%.2f, fixed_assets=%.2f, equity=%.2f",
                 bs.get("cash") or 0,
                 bs.get("accounts_receivable") or 0,
                 bs.get("accounts_payable") or 0,
-                pnl.get("revenue") or 0,
-                pnl.get("expenses") or 0,
+                bs.get("inventory") or 0,
+                bs.get("fixed_assets") or 0,
+                bs.get("equity") or 0,
             )
             
-            # Return both raw data (for backward compatibility) and extracted data
+            # Return data structure
+            # Note: P&L data should come from monthly P&L fetch, not here
             return {
-                # Raw data (for any legacy code that needs it)
+                # Raw data (for any code that needs it)
                 "balance_sheet_current": balance_sheet_current,
                 "balance_sheet_prior": balance_sheet_prior,
-                "profit_loss": profit_loss,
-                "trial_balance": trial_balance,
                 "account_type_map": accounts_map,
                 "invoices_receivable": receivables_raw,
                 "invoices_payable": payables_raw,
                 
-                # NEW: Clean extracted data (use this!)
+                # Clean extracted data (primary interface)
                 "extracted": extracted,
                 
-                # Backward compatible aliases (will be deprecated)
+                # Backward compatible alias
                 "balance_sheet_totals": extracted["balance_sheet"],
-                "trial_balance_pnl": {
-                    "revenue": pnl.get("revenue"),
-                    "cost_of_sales": pnl.get("cost_of_sales"),
-                    "expenses": pnl.get("expenses"),
-                },
                 
                 # Metadata
                 "fetched_at": datetime.now(timezone.utc).isoformat(),

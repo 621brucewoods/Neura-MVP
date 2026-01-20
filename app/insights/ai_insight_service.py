@@ -402,7 +402,7 @@ All fields are required, but supporting_numbers can be [] and data_notes can be 
                 logger.debug("Truncated payables invoices from %d to 20", len(invoices))
         
         # Truncate report structures (limit rows)
-        for report_key in ["balance_sheet_current", "balance_sheet_prior", "profit_loss", "trial_balance"]:
+        for report_key in ["balance_sheet_current", "balance_sheet_prior", "profit_loss"]:
             if report_key in truncated and isinstance(truncated[report_key], dict):
                 truncated[report_key] = self._truncate_report_structure(
                     truncated[report_key],

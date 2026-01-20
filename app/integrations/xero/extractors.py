@@ -7,8 +7,14 @@ Single source of truth for extracting financial data from Xero API responses.
 Design Principles:
 1. ONE place for all extraction logic
 2. AccountType-based only (no fragile label matching)
-3. Clear logging showing exactly what accounts contribute to each total
-4. Returns clean typed data (see extracted_types.py)
+3. Handles ALL 17 Xero AccountTypes for maximum compatibility
+4. Clear logging showing exactly what accounts contribute to each total
+5. Returns clean typed data (see extracted_types.py)
+
+Xero AccountTypes Handled:
+- Balance Sheet: BANK, CURRENT, INVENTORY, PREPAYMENT, FIXED, NONCURRENT, 
+                 DEPRECIATN, CURRLIAB, LIABILITY, TERMLIAB, EQUITY
+- P&L: REVENUE, SALES, OTHERINCOME, DIRECTCOSTS, EXPENSE, OVERHEADS
 
 Usage:
     from app.integrations.xero.extractors import Extractors
@@ -16,7 +22,6 @@ Usage:
     # Extract all data at once
     financial_data = Extractors.extract_all(
         balance_sheet_raw=...,
-        trial_balance_raw=...,
         invoices_receivable=...,
         invoices_payable=...,
         account_map=...,
@@ -24,7 +29,9 @@ Usage:
     
     # Or extract individually
     bs_data = Extractors.extract_balance_sheet(raw_data, account_map)
-    pnl_data = Extractors.extract_pnl(raw_data, account_map)
+    
+    # Extract P&L from monthly data
+    monthly_pnl = Extractors.extract_monthly_pnl_totals(monthly_data, account_map)
 """
 
 import logging
@@ -128,13 +135,20 @@ class BalanceSheetExtractor:
     """
     Extracts Balance Sheet data using AccountType-based summing.
     
-    AccountType mapping:
+    Handles ALL Xero AccountTypes for Balance Sheet:
     - BANK → cash
     - CURRENT + DEBTORS → accounts_receivable
     - CURRENT (other) → other_current_assets
+    - INVENTORY → inventory
+    - PREPAYMENT → prepayments
     - FIXED → fixed_assets
+    - NONCURRENT → non_current_assets
+    - DEPRECIATN → accumulated_depreciation
     - CURRLIAB + CREDITORS → accounts_payable
     - CURRLIAB (other) → other_current_liabilities
+    - LIABILITY → long_term_liabilities
+    - TERMLIAB → long_term_liabilities
+    - EQUITY → equity
     """
     
     @staticmethod
@@ -152,18 +166,30 @@ class BalanceSheetExtractor:
         Returns:
             BalanceSheetData with all extracted totals
         """
-        # Initialize accumulators
+        # Initialize accumulators for ALL AccountTypes
         totals = {
+            # Current Assets
             "cash": Decimal("0"),
             "accounts_receivable": Decimal("0"),
             "other_current_assets": Decimal("0"),
+            "inventory": Decimal("0"),
+            "prepayments": Decimal("0"),
+            # Non-Current Assets
             "fixed_assets": Decimal("0"),
+            "non_current_assets": Decimal("0"),
+            "accumulated_depreciation": Decimal("0"),
+            # Current Liabilities
             "accounts_payable": Decimal("0"),
             "other_current_liabilities": Decimal("0"),
+            # Non-Current Liabilities
+            "long_term_liabilities": Decimal("0"),
+            # Equity
+            "equity": Decimal("0"),
         }
         
         # Track which accounts contributed (for debugging)
         account_sources: dict[str, list[str]] = {k: [] for k in totals}
+        unhandled_types: dict[str, int] = {}  # Track unhandled types for logging
         has_data = False
         
         # Handle both {"raw_data": {...}} and direct raw format
@@ -215,7 +241,7 @@ class BalanceSheetExtractor:
                     account_type_upper = account_type.upper()
                     system_upper = (system_account or "").upper()
                     
-                    # Classify by AccountType
+                    # Classify by AccountType - handle ALL Xero AccountTypes
                     if account_type_upper == "BANK":
                         totals["cash"] += value
                         account_sources["cash"].append(account_id[:8])
@@ -228,9 +254,25 @@ class BalanceSheetExtractor:
                             totals["other_current_assets"] += value
                             account_sources["other_current_assets"].append(account_id[:8])
                     
+                    elif account_type_upper == "INVENTORY":
+                        totals["inventory"] += value
+                        account_sources["inventory"].append(account_id[:8])
+                    
+                    elif account_type_upper == "PREPAYMENT":
+                        totals["prepayments"] += value
+                        account_sources["prepayments"].append(account_id[:8])
+                    
                     elif account_type_upper == "FIXED":
                         totals["fixed_assets"] += value
                         account_sources["fixed_assets"].append(account_id[:8])
+                    
+                    elif account_type_upper == "NONCURRENT":
+                        totals["non_current_assets"] += value
+                        account_sources["non_current_assets"].append(account_id[:8])
+                    
+                    elif account_type_upper == "DEPRECIATN":
+                        totals["accumulated_depreciation"] += value
+                        account_sources["accumulated_depreciation"].append(account_id[:8])
                     
                     elif account_type_upper == "CURRLIAB":
                         if system_upper == "CREDITORS":
@@ -239,6 +281,22 @@ class BalanceSheetExtractor:
                         else:
                             totals["other_current_liabilities"] += value
                             account_sources["other_current_liabilities"].append(account_id[:8])
+                    
+                    elif account_type_upper in ("LIABILITY", "TERMLIAB"):
+                        totals["long_term_liabilities"] += value
+                        account_sources["long_term_liabilities"].append(account_id[:8])
+                    
+                    elif account_type_upper == "EQUITY":
+                        totals["equity"] += value
+                        account_sources["equity"].append(account_id[:8])
+                    
+                    else:
+                        # Track unhandled types (P&L types appearing in BS are normal)
+                        # Only log truly unexpected types
+                        pnl_types = {"REVENUE", "SALES", "OTHERINCOME", "DIRECTCOSTS", 
+                                    "EXPENSE", "OVERHEADS", "COGS"}
+                        if account_type_upper not in pnl_types:
+                            unhandled_types[account_type_upper] = unhandled_types.get(account_type_upper, 0) + 1
                 
                 # Process nested rows
                 nested = row.get("Rows", row.get("rows", []))
@@ -247,20 +305,45 @@ class BalanceSheetExtractor:
         
         process_rows(rows)
         
+        # Log any unhandled account types as warning
+        if unhandled_types:
+            logger.warning(
+                "Unhandled AccountTypes in Balance Sheet (may affect totals): %s",
+                unhandled_types
+            )
+        
         if not has_data:
             logger.warning("No account data found in balance sheet")
             return BalanceSheetExtractor._empty_result()
         
         # Calculate totals
-        current_assets = totals["cash"] + totals["accounts_receivable"] + totals["other_current_assets"]
+        current_assets = (
+            totals["cash"] + 
+            totals["accounts_receivable"] + 
+            totals["other_current_assets"] +
+            totals["inventory"] +
+            totals["prepayments"]
+        )
         current_liabilities = totals["accounts_payable"] + totals["other_current_liabilities"]
+        total_assets = (
+            current_assets + 
+            totals["fixed_assets"] + 
+            totals["non_current_assets"] + 
+            totals["accumulated_depreciation"]  # Usually negative
+        )
+        total_liabilities = current_liabilities + totals["long_term_liabilities"]
         
         # Log extraction summary
         logger.info(
-            "Balance Sheet extracted: cash=%.2f (%d accounts), "
-            "AR=%.2f (%d accounts), current_assets=%.2f, current_liab=%.2f",
+            "Balance Sheet extracted: cash=%.2f (%d), AR=%.2f (%d), "
+            "inventory=%.2f (%d), fixed=%.2f (%d), AP=%.2f (%d), "
+            "equity=%.2f (%d), current_assets=%.2f, current_liab=%.2f",
             float(totals["cash"]), len(account_sources["cash"]),
             float(totals["accounts_receivable"]), len(account_sources["accounts_receivable"]),
+            float(totals["inventory"]), len(account_sources["inventory"]),
+            float(totals["fixed_assets"]), len(account_sources["fixed_assets"]),
+            float(totals["accounts_payable"]), len(account_sources["accounts_payable"]),
+            float(totals["equity"]), len(account_sources["equity"]),
             float(current_assets), float(current_liabilities)
         )
         
@@ -268,12 +351,19 @@ class BalanceSheetExtractor:
             cash=float(totals["cash"]),
             accounts_receivable=float(totals["accounts_receivable"]),
             other_current_assets=float(totals["other_current_assets"]),
+            inventory=float(totals["inventory"]) if totals["inventory"] else None,
+            prepayments=float(totals["prepayments"]) if totals["prepayments"] else None,
             current_assets_total=float(current_assets),
-            inventory=None,  # Cannot reliably extract inventory
             fixed_assets=float(totals["fixed_assets"]),
+            non_current_assets=float(totals["non_current_assets"]) if totals["non_current_assets"] else None,
+            accumulated_depreciation=float(totals["accumulated_depreciation"]) if totals["accumulated_depreciation"] else None,
+            total_assets=float(total_assets),
             accounts_payable=float(totals["accounts_payable"]),
             other_current_liabilities=float(totals["other_current_liabilities"]),
             current_liabilities_total=float(current_liabilities),
+            long_term_liabilities=float(totals["long_term_liabilities"]) if totals["long_term_liabilities"] else None,
+            total_liabilities=float(total_liabilities),
+            equity=float(totals["equity"]) if totals["equity"] else None,
         )
     
     @staticmethod
@@ -283,12 +373,19 @@ class BalanceSheetExtractor:
             cash=None,
             accounts_receivable=None,
             other_current_assets=None,
-            current_assets_total=None,
             inventory=None,
+            prepayments=None,
+            current_assets_total=None,
             fixed_assets=None,
+            non_current_assets=None,
+            accumulated_depreciation=None,
+            total_assets=None,
             accounts_payable=None,
             other_current_liabilities=None,
             current_liabilities_total=None,
+            long_term_liabilities=None,
+            total_liabilities=None,
+            equity=None,
         )
 
 
@@ -298,12 +395,18 @@ class BalanceSheetExtractor:
 
 class PnLExtractor:
     """
-    Extracts P&L data from Trial Balance using AccountType-based summing.
+    Extracts P&L data from any P&L-structured report using AccountType-based summing.
     
-    AccountType mapping:
-    - REVENUE, SALES, OTHERINCOME → revenue
-    - COGS, DIRECTCOSTS → cost_of_sales
-    - EXPENSE, OVERHEADS → expenses
+    Works with both Monthly P&L reports and any report containing P&L account data.
+    The structure (Rows/Cells with AccountID attributes) is consistent across reports.
+    
+    AccountType mapping (all P&L types):
+    - REVENUE → revenue
+    - SALES → revenue  
+    - OTHERINCOME → revenue
+    - DIRECTCOSTS → cost_of_sales (COGS)
+    - EXPENSE → expenses
+    - OVERHEADS → expenses
     """
     
     @staticmethod
@@ -312,10 +415,10 @@ class PnLExtractor:
         account_map: dict[str, Any],
     ) -> PnLData:
         """
-        Extract P&L totals from Trial Balance.
+        Extract P&L totals from a P&L-structured report.
         
         Args:
-            raw_data: Raw trial balance dict
+            raw_data: Raw P&L report dict (Monthly P&L or similar structure)
             account_map: AccountID → AccountInfo mapping
             
         Returns:
@@ -328,6 +431,7 @@ class PnLExtractor:
         }
         
         account_sources: dict[str, list[str]] = {k: [] for k in totals}
+        unhandled_types: dict[str, int] = {}  # Track unhandled P&L types
         has_data = False
         
         # Handle both formats
@@ -338,18 +442,24 @@ class PnLExtractor:
         
         rows = inner.get("Rows", inner.get("rows", []))
         if not isinstance(rows, list):
-            logger.warning("Trial balance has no valid rows")
+            logger.warning("P&L report has no valid rows")
             return PnLExtractor._empty_result()
         
-        # AccountType to category mapping
+        # AccountType to category mapping - all P&L types
         type_to_category = {
             "REVENUE": "revenue",
             "SALES": "revenue",
             "OTHERINCOME": "revenue",
-            "COGS": "cost_of_sales",
             "DIRECTCOSTS": "cost_of_sales",
             "EXPENSE": "expenses",
             "OVERHEADS": "expenses",
+        }
+        
+        # Balance sheet types that are expected to be skipped in P&L
+        balance_sheet_types = {
+            "BANK", "CURRENT", "INVENTORY", "PREPAYMENT", "FIXED", 
+            "NONCURRENT", "DEPRECIATN", "CURRLIAB", "LIABILITY", 
+            "TERMLIAB", "EQUITY"
         }
         
         def process_rows(rows_list: list) -> None:
@@ -374,8 +484,13 @@ class PnLExtractor:
                     if not account_type:
                         continue
                     
-                    category = type_to_category.get(account_type.upper())
+                    account_type_upper = account_type.upper()
+                    category = type_to_category.get(account_type_upper)
+                    
                     if not category:
+                        # Track truly unhandled types (not BS types)
+                        if account_type_upper not in balance_sheet_types:
+                            unhandled_types[account_type_upper] = unhandled_types.get(account_type_upper, 0) + 1
                         continue
                     
                     value_cell = cells[1]
@@ -396,8 +511,15 @@ class PnLExtractor:
         
         process_rows(rows)
         
+        # Log any unhandled account types as warning
+        if unhandled_types:
+            logger.warning(
+                "Unhandled AccountTypes in P&L (may affect totals): %s",
+                unhandled_types
+            )
+        
         if not has_data:
-            logger.warning("No P&L data found in trial balance")
+            logger.warning("No P&L data found in report")
             return PnLExtractor._empty_result()
         
         # Calculate profits
@@ -609,14 +731,6 @@ class Extractors:
         return BalanceSheetExtractor.extract(raw_data, account_map)
     
     @staticmethod
-    def extract_pnl(
-        raw_data: dict[str, Any],
-        account_map: dict[str, Any],
-    ) -> PnLData:
-        """Extract P&L data from Trial Balance."""
-        return PnLExtractor.extract(raw_data, account_map)
-    
-    @staticmethod
     def extract_receivables(invoice_data: dict[str, Any]) -> InvoiceAgeingData:
         """Extract Accounts Receivable ageing."""
         return InvoiceExtractor.extract(invoice_data)
@@ -665,8 +779,7 @@ class Extractors:
                 })
                 continue
             
-            # Extract P&L using trial balance extractor logic
-            # Note: Monthly P&L reports have same structure as Trial Balance
+            # Extract P&L using AccountType-based extraction
             pnl = PnLExtractor.extract(raw_data, account_map)
             
             result.append({
@@ -695,7 +808,6 @@ class Extractors:
     @staticmethod
     def extract_all(
         balance_sheet_raw: dict[str, Any],
-        trial_balance_raw: dict[str, Any],
         invoices_receivable: dict[str, Any],
         invoices_payable: dict[str, Any],
         account_map: dict[str, Any],
@@ -708,9 +820,12 @@ class Extractors:
         
         This is the primary method for downstream services.
         
+        Note: P&L data is now extracted from Monthly P&L reports via
+        extract_monthly_pnl_totals(), not from this method. The pnl field
+        in the result will be empty - use monthly P&L data instead.
+        
         Args:
             balance_sheet_raw: Raw balance sheet from Xero
-            trial_balance_raw: Raw trial balance from Xero
             invoices_receivable: Result from fetch_receivables()
             invoices_payable: Result from fetch_payables()
             account_map: AccountID → AccountInfo mapping
@@ -719,25 +834,27 @@ class Extractors:
             period_end: Optional period end date (ISO)
             
         Returns:
-            Complete FinancialData structure
+            Complete FinancialData structure (pnl will be empty)
         """
         logger.info("Starting full data extraction for org=%s", organization_id or "unknown")
         
         # Extract each section
         balance_sheet = Extractors.extract_balance_sheet(balance_sheet_raw, account_map)
-        pnl = Extractors.extract_pnl(trial_balance_raw, account_map)
         receivables = Extractors.extract_receivables(invoices_receivable)
         payables = Extractors.extract_payables(invoices_payable)
         
+        # P&L is now extracted from Monthly P&L reports, not here
+        # Return empty P&L - callers should use extract_monthly_pnl_totals()
+        pnl = PnLExtractor._empty_result()
+        
         # Determine data availability
         has_bs = balance_sheet.get("cash") is not None
-        has_pnl = pnl.get("revenue") is not None
         has_ar = receivables.get("count", 0) > 0
         has_ap = payables.get("count", 0) > 0
         
         logger.info(
-            "Extraction complete: has_bs=%s, has_pnl=%s, has_ar=%s, has_ap=%s",
-            has_bs, has_pnl, has_ar, has_ap
+            "Extraction complete: has_bs=%s, has_ar=%s, has_ap=%s",
+            has_bs, has_ar, has_ap
         )
         
         return FinancialData(
@@ -750,7 +867,7 @@ class Extractors:
             period_start=period_start,
             period_end=period_end,
             has_balance_sheet=has_bs,
-            has_pnl=has_pnl,
+            has_pnl=False,  # P&L comes from monthly data now
             has_receivables=has_ar,
             has_payables=has_ap,
         )

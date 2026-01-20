@@ -116,7 +116,6 @@ class InsightsService:
             if account_type_map:
                 extracted = Extractors.extract_all(
                     balance_sheet_raw=balance_sheet_current,
-                    trial_balance_raw={},  # Not used for P&L anymore
                     invoices_receivable=financial_data.get("invoices_receivable", {}),
                     invoices_payable=financial_data.get("invoices_payable", {}),
                     account_map=account_type_map,

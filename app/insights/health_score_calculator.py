@@ -476,8 +476,7 @@ class HealthScoreCalculator:
                               
         Note:
             P&L metrics (revenue, expenses, COGS) are derived from monthly_pnl_data
-            using a rolling 3-month sum, as per BHS spec. This replaces the previous
-            trial_balance_pnl parameter which provided YTD cumulative values.
+            using a rolling 3-month sum, as per BHS spec.
         
         Returns:
             Complete Health Score result including score, grade, confidence,
