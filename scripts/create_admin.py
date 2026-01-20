@@ -1,6 +1,10 @@
 """
 Create Admin User Script
-Simple script to create admin users from command line.
+Simple script to promote existing users to admin role.
+
+Note: Authentication is handled by Supabase. This script only updates
+the role field in the application database. Users must already exist
+(have signed up via Supabase) before they can be promoted to admin.
 """
 
 import asyncio
@@ -13,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from sqlalchemy import select
 
 from app.auth.service import AuthService
-from app.auth.utils import hash_password, normalize_email
+from app.auth.utils import normalize_email
 from app.database.connection import async_session_factory
 from app.models.user import User, UserRole
 
@@ -38,77 +42,60 @@ async def list_admins() -> None:
             print("-" * 60)
 
 
-async def create_admin(email: str, password: str) -> None:
-    """Create a new admin user or upgrade existing user to admin."""
+async def promote_to_admin(email: str) -> None:
+    """Promote an existing user to admin role."""
     async with async_session_factory() as session:
         auth_service = AuthService(session)
         normalized_email = normalize_email(email)
         
-        # Check if user already exists
+        # Check if user exists
         existing_user = await auth_service.get_user_by_email(normalized_email)
         
-        if existing_user:
-            # Update existing user to admin
-            if existing_user.role == UserRole.ADMIN:
-                print(f"\n❌ User {normalized_email} is already an admin.")
-                return
-            
-            existing_user.role = UserRole.ADMIN
-            # Update password if provided
-            existing_user.password_hash = hash_password(password)
-            await session.commit()
-            print(f"\n✅ Updated user {normalized_email} to admin role.")
-        else:
-            # Create new admin user (without organization - admins don't need one)
-            user = User(
-                email=normalized_email,
-                password_hash=hash_password(password),
-                is_active=True,
-                is_verified=True,
-                role=UserRole.ADMIN,
-            )
-            session.add(user)
-            await session.commit()
-            await session.refresh(user)
-            print(f"\n✅ Created new admin user: {normalized_email}")
+        if not existing_user:
+            print(f"\n❌ User {normalized_email} not found.")
+            print("   Users must sign up via the app first before being promoted to admin.")
+            return
+        
+        if existing_user.role == UserRole.ADMIN:
+            print(f"\n❌ User {normalized_email} is already an admin.")
+            return
+        
+        # Promote to admin
+        existing_user.role = UserRole.ADMIN
+        await session.commit()
+        print(f"\n✅ Promoted {normalized_email} to admin role.")
 
 
 async def main() -> None:
     """Main script entry point."""
     print("=" * 60)
-    print("🔐 Create Admin User")
+    print("🔐 Promote User to Admin")
     print("=" * 60)
+    print("\nNote: User must have signed up via the app first.")
+    print("This script only changes their role to admin.")
     
     # List current admins
     await list_admins()
     
     # Get email
     print("\n" + "=" * 60)
-    email = input("📧 Enter email address: ").strip()
+    email = input("📧 Enter email of user to promote: ").strip()
     
     if not email:
         print("\n❌ Email is required.")
         sys.exit(1)
     
-    # Get password
-    import getpass
-    password = getpass.getpass("🔑 Enter password: ").strip()
-    
-    if not password:
-        print("\n❌ Password is required.")
-        sys.exit(1)
-    
     # Confirm
     print("\n" + "=" * 60)
-    confirm = input(f"Create admin user '{email}'? (yes/no): ").strip().lower()
+    confirm = input(f"Promote '{email}' to admin? (yes/no): ").strip().lower()
     
     if confirm not in ["yes", "y"]:
         print("\n❌ Cancelled.")
         sys.exit(0)
     
-    # Create admin
+    # Promote to admin
     try:
-        await create_admin(email, password)
+        await promote_to_admin(email)
         print("\n✅ Done!")
     except ValueError as e:
         print(f"\n❌ Error: {e}")
