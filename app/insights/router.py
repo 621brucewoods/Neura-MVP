@@ -4,7 +4,7 @@ API endpoints for financial insights and calculations.
 """
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
@@ -13,16 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user
 from app.database.connection import async_session_factory, get_async_session
-from app.insights.data_summarizer import DataSummarizer
-from app.insights.health_score_calculator import HealthScoreCalculator
-from app.insights.insight_generator import InsightGenerator
 from app.insights.schemas import InsightsResponse, Insight, InsightUpdate
-from app.insights.service import InsightsService
 from app.insights.sync_service import SyncService
-from app.integrations.xero.cache_service import CacheService
-from app.integrations.xero.data_fetcher import XeroDataFetcher
-from app.integrations.xero.extractors import Extractors
-from app.integrations.xero.sdk_client import create_xero_sdk_client, XeroSDKClientError
 from app.models.calculated_metrics import CalculatedMetrics
 from app.models.insight import Insight as InsightModel
 from app.models.organization import Organization, SyncStatus, SyncStep
@@ -320,15 +312,12 @@ async def get_health_score(
 async def get_insight_detail(
     insight_id: str,
     current_user: User = Depends(get_current_user),
-    start_date: Optional[date] = Query(None, description="Start date for P&L period (YYYY-MM-DD). Defaults to 30 days ago."),
-    end_date: Optional[date] = Query(None, description="End date for P&L period (YYYY-MM-DD). Defaults to today."),
     db: AsyncSession = Depends(get_async_session),
 ) -> Insight:
     """
     Get detailed view of a specific insight.
     
-    Regenerates insights to find the matching one by ID.
-    In future, this could be cached/stored for better performance.
+    Reads from database - insights are generated and stored during sync.
     """
     if not current_user.organization:
         raise HTTPException(
@@ -336,105 +325,43 @@ async def get_insight_detail(
             detail="User has no organization",
         )
     
-    # Set default dates if not provided
-    today = datetime.now(timezone.utc).date()
-    if end_date is None:
-        end_date = today
-    if start_date is None:
-        start_date = today - timedelta(days=30)
-    
-    # Validate date range
-    if start_date >= end_date:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="start_date must be before end_date",
-        )
-    
-    if end_date > today:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="end_date cannot be in the future",
-        )
-    
     try:
-        # Create cache service
-        cache_service = CacheService(db)
-        
-        # Create SDK client
-        sdk_client = await create_xero_sdk_client(
-            organization_id=current_user.organization.id,
-            db=db,
-        )
-        
-        # Create data fetcher
-        data_fetcher = XeroDataFetcher(sdk_client, cache_service=cache_service, db=db)
-        
-        # Fetch all data
-        financial_data = await data_fetcher.fetch_all_data(
-            organization_id=current_user.organization.id,
-            start_date=start_date,
-            end_date=end_date,
-            force_refresh=False,
-        )
-        
-        # Commit token updates before blocking OpenAI call
-        # This ensures the session is clean and prevents deadlocks
-        if data_fetcher.session_manager:
-            await data_fetcher.session_manager.commit_all()
-        
-        # Fetch monthly P&L data for profitability calculations
-        monthly_pnl_data = None
-        try:
-            monthly_pnl_raw = await data_fetcher.orchestrator.fetch_monthly_pnl_with_cache(
-                organization_id=current_user.organization.id,
-                num_months=12,
-                force_refresh=False,
+        # Read insight from database
+        stmt = select(InsightModel).where(
+            and_(
+                InsightModel.insight_id == insight_id,
+                InsightModel.organization_id == current_user.organization.id,
             )
-            account_map = financial_data.get("account_type_map", {})
-            if monthly_pnl_raw and account_map:
-                from app.integrations.xero.extractors import Extractors
-                monthly_pnl_data = Extractors.extract_monthly_pnl_totals(monthly_pnl_raw, account_map)
-        except Exception:
-            pass  # Use None if fetch fails
+        )
+        result = await db.execute(stmt)
+        insight = result.scalar_one_or_none()
         
-        # Calculate metrics using monthly P&L data
-        metrics = InsightsService.calculate_all_insights(financial_data, monthly_pnl_data)
+        if not insight:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Insight with ID {insight_id} not found",
+            )
         
-        # Create compact summary of raw data for AI analysis
-        raw_data_summary = DataSummarizer.summarize(financial_data, start_date, end_date, monthly_pnl_data)
-        
-        # Generate all insights using AI
-        insight_generator = InsightGenerator()
-        all_insights = insight_generator.generate_insights(
-            metrics={
-                "cash_runway": metrics["cash_runway"],
-                "cash_pressure": metrics["cash_pressure"],
-                "leading_indicators": metrics["leading_indicators"],
-                "profitability": metrics["profitability"],
-                "upcoming_commitments": metrics["upcoming_commitments"],
-            },
-            raw_data_summary=raw_data_summary,
-            start_date=start_date.isoformat(),
-            end_date=end_date.isoformat(),
+        # Return insight data
+        return Insight(
+            insight_id=insight.insight_id,
+            insight_type=insight.insight_type,
+            title=insight.title,
+            severity=insight.severity,
+            confidence_level=insight.confidence_level,
+            summary=insight.summary,
+            why_it_matters=insight.why_it_matters,
+            recommended_actions=insight.recommended_actions,
+            supporting_numbers=insight.supporting_numbers or [],
+            data_notes=insight.data_notes,
+            generated_at=insight.generated_at.isoformat(),
+            is_acknowledged=insight.is_acknowledged,
+            is_marked_done=insight.is_marked_done,
         )
         
-        # Find insight by ID
-        for insight_dict in all_insights:
-            if insight_dict.get("insight_id") == insight_id:
-                return Insight(**insight_dict)
-        
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Insight with ID {insight_id} not found",
-        )
-        
-    except XeroSDKClientError:
-        # Global exception handler will sanitize this
-        raise
     except HTTPException:
         raise
     except Exception:
-        # Global exception handler will sanitize this
         raise
 
 
@@ -527,24 +454,24 @@ async def update_insight(
 async def trigger_insights_generation(
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
-    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
-    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
     force_refresh: bool = Query(default=False, description="Force refresh, bypass cache"),
     db: AsyncSession = Depends(get_async_session),
 ):
     """
     Trigger the insights generation process in the background.
+    
+    Data fetching:
+    - Balance Sheet: as of today
+    - Monthly P&L: last 12 months (for trends and health score)
+    - AR/AP: current outstanding invoices
+    
     Updates organization status immediately so frontend can show progress.
     """
     if not current_user.organization:
         raise HTTPException(status_code=400, detail="User has no organization")
 
-    # Set default dates
+    # Balance sheet date is always today
     today = datetime.now(timezone.utc).date()
-    if end_date is None:
-        end_date = today
-    if start_date is None:
-        start_date = today - timedelta(days=30)
 
     # Update organization status IMMEDIATELY before starting background task
     # This ensures the frontend modal shows "Connecting" right away
@@ -552,31 +479,26 @@ async def trigger_insights_generation(
     org.sync_status = SyncStatus.IN_PROGRESS
     org.sync_step = SyncStep.CONNECTING
     org.last_sync_error = None
-    org.updated_at = datetime.now(timezone.utc)  # Explicitly set updated_at to UTC
+    org.updated_at = datetime.now(timezone.utc)
     await db.commit()
     
     # Refresh to get the latest updated_at timestamp after commit
     await db.refresh(org)
 
-    async def _background_task_wrapper(org_id, start, end, refresh):
+    async def _background_task_wrapper(org_id, bs_date, refresh):
         # Create a new session specifically for this background task
         async with async_session_factory() as session:
             try:
                 bg_service = SyncService(session, org_id)
-                # Note: SyncService will update status as it progresses
-                # It starts with CONNECTING, so we don't need to set it again
-                await bg_service.run_sync(start, end, refresh)
+                await bg_service.run_sync(bs_date, refresh)
             except Exception as e:
-                # Catch any unhandled exceptions to ensure session closes cleanly
-                # and doesn't crash the worker ungracefully (though SyncService catches most)
                 import logging
                 logging.getLogger(__name__).error(f"Background task failed: {e}")
 
     background_tasks.add_task(
         _background_task_wrapper,
         current_user.organization.id,
-        start_date,
-        end_date,
+        today,
         force_refresh
     )
     

@@ -135,8 +135,7 @@ class FinancialData(TypedDict):
     # Metadata
     extraction_timestamp: str  # ISO format
     organization_id: Optional[str]
-    period_start: Optional[str]  # ISO date
-    period_end: Optional[str]  # ISO date
+    period_end: Optional[str]  # Balance sheet as-of date (ISO)
     
     # Data quality indicators
     has_balance_sheet: bool

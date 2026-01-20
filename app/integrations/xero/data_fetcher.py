@@ -114,21 +114,22 @@ class XeroDataFetcher:
     async def fetch_all_data(
         self, 
         organization_id: Optional[UUID] = None,
-        start_date: date = None,
-        end_date: date = None,
+        balance_sheet_date: date = None,
         force_refresh: bool = False
     ) -> dict[str, Any]:
         """
-        Orchestrates fetching of all required financial data with parallelization.
+        Fetch all required financial data with parallelization.
         
-        Strategy:
-        - Group 1 (parallel): Balance Sheets, P&L, Accounts (all independent)
-        - Group 2 (parallel): Trial Balance, Receivables, Payables (after Accounts)
+        Fetches:
+        - Balance Sheet (current as of balance_sheet_date, prior 30 days before)
+        - Chart of Accounts (for AccountType mapping)
+        - AR/AP Invoices (current outstanding)
+        
+        Note: P&L data is fetched separately via orchestrator.fetch_monthly_pnl_with_cache()
         
         Args:
             organization_id: Organization UUID
-            start_date: P&L period start date
-            end_date: P&L period end date
+            balance_sheet_date: The "as of" date for Balance Sheet (typically today)
             force_refresh: If True, bypass cache and fetch fresh data
         
         Returns:
@@ -136,7 +137,6 @@ class XeroDataFetcher:
         """
         return await self.orchestrator.fetch_all(
             organization_id=organization_id,
-            start_date=start_date,
-            end_date=end_date,
+            balance_sheet_date=balance_sheet_date,
             force_refresh=force_refresh,
         )

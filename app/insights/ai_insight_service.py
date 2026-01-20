@@ -33,8 +33,7 @@ class AIInsightService:
         self,
         metrics: dict[str, Any],
         raw_data_summary: dict[str, Any],
-        start_date: str,
-        end_date: str,
+        balance_sheet_date: str,
     ) -> list[dict[str, Any]]:
         """
         Generate insights using OpenAI.
@@ -42,8 +41,7 @@ class AIInsightService:
         Args:
             metrics: Calculated financial metrics
             raw_data_summary: Summarized raw financial data
-            start_date: Start date of analysis period
-            end_date: End date of analysis period
+            balance_sheet_date: Balance sheet as-of date
         
         Returns:
             List of insight dictionaries (1-3 items)
@@ -55,7 +53,7 @@ class AIInsightService:
         # Truncate summary if needed to stay within token limits
         truncated_summary = self._truncate_summary_if_needed(raw_data_summary)
         
-        prompt = self._build_prompt(metrics, truncated_summary, start_date, end_date)
+        prompt = self._build_prompt(metrics, truncated_summary, balance_sheet_date)
         schema = self._get_json_schema()
         
         # Log token usage estimate
@@ -151,13 +149,13 @@ class AIInsightService:
         self,
         metrics: dict[str, Any],
         raw_data_summary: dict[str, Any],
-        start_date: str,
-        end_date: str,
+        balance_sheet_date: str,
     ) -> str:
         """Build user prompt with metrics and data summary."""
         return f"""Analyze the following financial data and generate 1-3 insights ranked by urgency.
 
-                Analysis Period: {start_date} to {end_date}
+                Balance Sheet As Of: {balance_sheet_date}
+                P&L Data: Rolling 12 months (most recent data available)
 
                 CALCULATED METRICS (AUTHORITATIVE):
                 {json.dumps(metrics, indent=2)}

@@ -4,7 +4,7 @@ Manages the asynchronous synchronization process and state updates.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import traceback
 from typing import Optional
 from uuid import UUID
@@ -70,16 +70,23 @@ class SyncService:
             logger.error(f"Failed to update sync status: {e}")
             await self.db.rollback()
 
-    async def run_sync(self, start_date, end_date, force_refresh: bool = False):
+    async def run_sync(self, balance_sheet_date: date, force_refresh: bool = False):
         """
         Main entry point for the background task.
-        Note: Status is already set to IN_PROGRESS/CONNECTING by the trigger endpoint,
-        so we don't need to set it again here.
+        
+        Args:
+            balance_sheet_date: The "as of" date for Balance Sheet (typically today)
+            force_refresh: If True, bypass cache and fetch fresh data
+            
+        Data fetched:
+        - Balance Sheet: as of balance_sheet_date
+        - Monthly P&L: last 12 months from today (for trends/health score)
+        - AR/AP Invoices: current outstanding
+        
+        Note: Status is already set to IN_PROGRESS/CONNECTING by the trigger endpoint.
         """
         try:
-            # Status already set to CONNECTING by trigger endpoint, so we proceed directly
-            
-            # 2. Setup Xero Client
+            # Setup Xero Client
             cache_service = CacheService(self.db)
             try:
                 sdk_client = await create_xero_sdk_client(self.organization_id, self.db)
@@ -88,25 +95,23 @@ class SyncService:
                 await self._update_status(SyncStatus.FAILED, None, error=f"Xero Connection Error: {str(e)}")
                 return
 
-            # 3. Fetch Data
+            # Fetch Balance Sheet and AR/AP data
             await self._update_status(SyncStatus.IN_PROGRESS, SyncStep.IMPORTING)
             financial_data = await data_fetcher.fetch_all_data(
                 organization_id=self.organization_id,
-                start_date=start_date,
-                end_date=end_date,
+                balance_sheet_date=balance_sheet_date,
                 force_refresh=force_refresh,
             )
             
-             # Commit token updates
+            # Commit token updates
             if data_fetcher.session_manager:
                 await data_fetcher.session_manager.commit_all()
 
-            # 4. Fetch Monthly P&L (used by ALL services: metrics, health score, AI summary)
+            # Fetch Monthly P&L (12 months for trends, health score, AI summary)
             await self._update_status(SyncStatus.IN_PROGRESS, SyncStep.CALCULATING)
             
             monthly_pnl_data = None
             try:
-                # Fetch monthly P&L (uses batched fetching to avoid rate limits)
                 monthly_pnl_raw = await data_fetcher.orchestrator.fetch_monthly_pnl_with_cache(
                     organization_id=self.organization_id,
                     num_months=12,
@@ -120,27 +125,25 @@ class SyncService:
                         monthly_pnl_raw,
                         account_map,
                     )
-                    logger.info(f"Extracted {len(monthly_pnl_data)} months of P&L data")
+                    # Log how many months have actual data
+                    months_with_data = sum(1 for m in monthly_pnl_data if m.get("has_data"))
+                    logger.info(f"Extracted P&L: {months_with_data} months with data out of {len(monthly_pnl_data)} fetched")
             except Exception as e:
                 logger.warning(f"Failed to fetch monthly P&L: {e}")
                 monthly_pnl_data = None
             
-            # 4.5 Calculate Metrics (using monthly P&L data)
+            # Calculate Metrics
             metrics = InsightsService.calculate_all_insights(financial_data, monthly_pnl_data)
-            raw_data_summary = DataSummarizer.summarize(financial_data, start_date, end_date, monthly_pnl_data)
+            raw_data_summary = DataSummarizer.summarize(financial_data, balance_sheet_date, monthly_pnl_data)
 
-            # 4.6 Calculate Health Score (using same monthly P&L data)
+            # Calculate Health Score
             health_score_payload = None
             try:
-                
-                # Prepare data for Health Score calculation
-                # P&L data comes from monthly_pnl_data (rolling 3-month)
                 extracted = financial_data.get("extracted", {})
                 balance_sheet_totals = extracted.get("balance_sheet", {})
                 invoices_receivable = financial_data.get("invoices_receivable", {})
                 invoices_payable = financial_data.get("invoices_payable", {})
                 
-                # Calculate Health Score using monthly P&L data
                 health_score = HealthScoreCalculator.calculate(
                     balance_sheet_totals=balance_sheet_totals,
                     invoices_receivable=invoices_receivable,
@@ -149,14 +152,14 @@ class SyncService:
                 )
                 
                 # Add metadata
+                months_with_data = sum(1 for m in (monthly_pnl_data or []) if m.get("has_data"))
                 health_score["generated_at"] = datetime.now(timezone.utc).isoformat()
                 health_score["periods"] = {
-                    "pnl_monthly": {
-                        "start_date": start_date.isoformat(),
-                        "end_date": end_date.isoformat(),
-                        "months": len(monthly_pnl_data) if monthly_pnl_data else 1,
+                    "balance_sheet_asof": balance_sheet_date.isoformat(),
+                    "monthly_pnl": {
+                        "months_fetched": len(monthly_pnl_data) if monthly_pnl_data else 0,
+                        "months_with_data": months_with_data,
                     },
-                    "balance_sheet_asof": end_date.isoformat(),
                 }
                 
                 health_score_payload = health_score
@@ -200,19 +203,17 @@ class SyncService:
             if calc_metrics:
                 # Update existing
                 calc_metrics.metrics_payload = metrics_payload
-                calc_metrics.health_score_payload = health_score_payload  # NEW: Save health score
+                calc_metrics.health_score_payload = health_score_payload
                 calc_metrics.calculated_at = generated_at
-                calc_metrics.data_period_start = start_date
-                calc_metrics.data_period_end = end_date
+                calc_metrics.data_period_end = datetime.combine(balance_sheet_date, datetime.min.time()).replace(tzinfo=timezone.utc)
             else:
                 # Create new
                 calc_metrics = CalculatedMetrics(
                     organization_id=self.organization_id,
                     metrics_payload=metrics_payload,
-                    health_score_payload=health_score_payload,  # NEW: Save health score
+                    health_score_payload=health_score_payload,
                     calculated_at=generated_at,
-                    data_period_start=start_date,
-                    data_period_end=end_date,
+                    data_period_end=datetime.combine(balance_sheet_date, datetime.min.time()).replace(tzinfo=timezone.utc),
                 )
                 self.db.add(calc_metrics)
                 
@@ -243,8 +244,7 @@ class SyncService:
                         "upcoming_commitments": metrics["upcoming_commitments"],
                     },
                     raw_data_summary=raw_data_summary,
-                    start_date=start_date.isoformat(),
-                    end_date=end_date.isoformat(),
+                    balance_sheet_date=balance_sheet_date.isoformat(),
                 )
 
             generated_insights = await loop.run_in_executor(None, _generate)

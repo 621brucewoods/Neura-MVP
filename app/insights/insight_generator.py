@@ -29,8 +29,7 @@ class InsightGenerator:
         self,
         metrics: dict[str, Any],
         raw_data_summary: dict[str, Any],
-        start_date: str,
-        end_date: str,
+        balance_sheet_date: str,
     ) -> list[dict[str, Any]]:
         """
         Generate insights using AI.
@@ -38,8 +37,7 @@ class InsightGenerator:
         Args:
             metrics: Combined financial metrics dictionary
             raw_data_summary: Summarized raw financial data
-            start_date: Start date of analysis period (ISO format)
-            end_date: End date of analysis period (ISO format)
+            balance_sheet_date: Balance sheet as-of date (ISO format)
         
         Returns:
             List of insight dictionaries (1-3 items), ranked by urgency
@@ -48,8 +46,7 @@ class InsightGenerator:
             insights = self.ai_service.generate_insights(
                 metrics=metrics,
                 raw_data_summary=raw_data_summary,
-                start_date=start_date,
-                end_date=end_date,
+                balance_sheet_date=balance_sheet_date,
             )
             
             # Add insight_id and generated_at to each insight

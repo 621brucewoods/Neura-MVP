@@ -812,7 +812,6 @@ class Extractors:
         invoices_payable: dict[str, Any],
         account_map: dict[str, Any],
         organization_id: Optional[str] = None,
-        period_start: Optional[str] = None,
         period_end: Optional[str] = None,
     ) -> FinancialData:
         """
@@ -820,9 +819,8 @@ class Extractors:
         
         This is the primary method for downstream services.
         
-        Note: P&L data is now extracted from Monthly P&L reports via
-        extract_monthly_pnl_totals(), not from this method. The pnl field
-        in the result will be empty - use monthly P&L data instead.
+        Note: P&L data is extracted from Monthly P&L reports via
+        extract_monthly_pnl_totals(), not from this method.
         
         Args:
             balance_sheet_raw: Raw balance sheet from Xero
@@ -830,8 +828,7 @@ class Extractors:
             invoices_payable: Result from fetch_payables()
             account_map: AccountID → AccountInfo mapping
             organization_id: Optional org ID for logging
-            period_start: Optional period start date (ISO)
-            period_end: Optional period end date (ISO)
+            period_end: Balance sheet as-of date (ISO)
             
         Returns:
             Complete FinancialData structure (pnl will be empty)
@@ -864,10 +861,9 @@ class Extractors:
             payables=payables,
             extraction_timestamp=datetime.now(timezone.utc).isoformat(),
             organization_id=organization_id,
-            period_start=period_start,
             period_end=period_end,
             has_balance_sheet=has_bs,
-            has_pnl=False,  # P&L comes from monthly data now
+            has_pnl=False,  # P&L comes from monthly data
             has_receivables=has_ar,
             has_payables=has_ap,
         )

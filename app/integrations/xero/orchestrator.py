@@ -130,8 +130,7 @@ class XeroDataOrchestrator:
     async def fetch_all(
         self,
         organization_id: Optional[UUID] = None,
-        start_date: date = None,
-        end_date: date = None,
+        balance_sheet_date: date = None,
         force_refresh: bool = False
     ) -> dict[str, Any]:
         """
@@ -146,8 +145,7 @@ class XeroDataOrchestrator:
         
         Args:
             organization_id: Organization UUID
-            start_date: Period start date (for metadata)
-            end_date: Period end date (Balance Sheet date)
+            balance_sheet_date: The "as of" date for Balance Sheet (typically today)
             force_refresh: If True, bypass cache and fetch fresh data
         
         Returns:
@@ -156,13 +154,10 @@ class XeroDataOrchestrator:
         try:
             errors = []
             
-            if not start_date or not end_date:
-                raise ValueError("start_date and end_date are required")
+            if not balance_sheet_date:
+                raise ValueError("balance_sheet_date is required")
             
-            if start_date >= end_date:
-                raise ValueError("start_date must be before end_date")
-            
-            prior_date = end_date - timedelta(days=30)
+            prior_date = balance_sheet_date - timedelta(days=30)
             
             # Group 1: Fetch independent data in parallel
             (
@@ -170,7 +165,7 @@ class XeroDataOrchestrator:
                 (balance_sheet_prior, error_prior),
                 (accounts_map, error_accounts),
             ) = await asyncio.gather(
-                self._fetch_balance_sheet_with_error_handling(end_date, "current"),
+                self._fetch_balance_sheet_with_error_handling(balance_sheet_date, "current"),
                 self._fetch_balance_sheet_with_error_handling(prior_date, "prior"),
                 self._fetch_accounts_with_error_handling(),
             )
@@ -211,8 +206,7 @@ class XeroDataOrchestrator:
                 invoices_payable=payables_raw,
                 account_map=accounts_map,
                 organization_id=str(organization_id) if organization_id else None,
-                period_start=start_date.isoformat() if start_date else None,
-                period_end=end_date.isoformat() if end_date else None,
+                period_end=balance_sheet_date.isoformat() if balance_sheet_date else None,
             )
             
             # Log extraction summary

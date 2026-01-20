@@ -492,12 +492,9 @@ class HealthScoreCalculator:
         current_liabilities = balance_sheet_totals.get("current_liabilities_total")
         
         # Process monthly P&L data
-        monthly_pnl = monthly_pnl_data or []
-        has_monthly_data = len(monthly_pnl) >= 3  # Need at least 3 months
-        has_6_months = len(monthly_pnl) >= 6
-        
         # Extract monthly values lists (newest first)
         # Include 0 values (valid data), exclude None (no data)
+        monthly_pnl = monthly_pnl_data or []
         monthly_revenues = []
         monthly_cogs = []
         monthly_expenses = []
@@ -516,6 +513,10 @@ class HealthScoreCalculator:
                 monthly_expenses.append(float(exp))
             if rev is not None and exp is not None:
                 monthly_net_cash_proxy.append(float(rev) - float(exp))
+        
+        # Check data availability based on actual data, not list length
+        has_monthly_data = len(monthly_revenues) >= 3  # Need 3+ months with revenue data
+        has_6_months = len(monthly_revenues) >= 6  # Need 6+ months for trend analysis
         
         # Calculate rolling 3-month P&L totals (as per BHS spec)
         # Use available data even if less than 3 months

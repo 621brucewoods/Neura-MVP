@@ -155,8 +155,7 @@ class DataSummarizer:
     @staticmethod
     def summarize(
         financial_data: dict[str, Any],
-        start_date: date,
-        end_date: date,
+        balance_sheet_date: date,
         monthly_pnl_data: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         """
@@ -164,8 +163,7 @@ class DataSummarizer:
         
         Args:
             financial_data: Complete data from XeroDataFetcher.fetch_all_data()
-            start_date: Period start date
-            end_date: Period end date
+            balance_sheet_date: Balance sheet as-of date
             monthly_pnl_data: Monthly P&L data for profitability (newest first)
         
         Returns:
@@ -203,10 +201,13 @@ class DataSummarizer:
         receivables = financial_data.get("invoices_receivable", {})
         payables = financial_data.get("invoices_payable", {})
 
+        # Get period info from monthly P&L data
+        months_with_data = [m for m in (monthly_pnl_data or []) if m.get("has_data")]
+        
         return {
             "period": {
-                "start_date": str(start_date),
-                "end_date": str(end_date),
+                "balance_sheet_asof": str(balance_sheet_date),
+                "pnl_months_available": len(months_with_data),
             },
             "cash": {
                 "current": float(cash_current) if cash_current is not None else None,
