@@ -194,6 +194,12 @@ class CalculatedMetrics(Base, UUIDMixin, TimestampMixin):
         comment="Full JSON payload of calculated metrics for dashboard display",
     )
     
+    health_score_payload: Mapped[Optional[dict]] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="Full JSON payload of Business Health Score (0-100)",
+    )
+    
     # Relationships
     organization: Mapped["Organization"] = relationship(
         "Organization",

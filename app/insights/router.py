@@ -209,27 +209,19 @@ async def get_sync_status(
 @router.get(
     "/health-score",
     summary="Get Business Health Score",
-    description="Calculate and return the Business Health Score (0-100) with detailed breakdown.",
+    description="Return the pre-calculated Business Health Score (0-100) from the last sync.",
 )
 async def get_health_score(
     current_user: User = Depends(get_current_user),
-    start_date: Optional[date] = Query(None, description="Start date for P&L period (YYYY-MM-DD). Defaults to 30 days ago."),
-    end_date: Optional[date] = Query(None, description="End date for P&L period (YYYY-MM-DD). Defaults to today."),
-    force_refresh: bool = Query(default=False, description="Force refresh, bypass cache"),
     db: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
     """
-    Calculate and return the Business Health Score v1 (0-100).
+    Return the Business Health Score v1 (0-100) from the last sync.
     
-    The score is based on:
-    - A) Cash & Runway (30 points)
-    - B) Profitability & Efficiency (25 points)
-    - C) Revenue Quality & Momentum (15 points) - *Requires historical data*
-    - D) Working Capital & Liquidity (20 points)
-    - E) Compliance & Data Confidence (10 points)
+    This endpoint reads from the database (fast, no Xero API calls).
+    Health Score is calculated during the sync process.
     
-    Uses AccountType-based data extraction for reliability.
-    Missing metrics are handled via weight redistribution.
+    To refresh the score, trigger a new sync via POST /api/insights/trigger.
     
     Returns:
         Complete Health Score result including:
@@ -238,7 +230,6 @@ async def get_health_score(
         - confidence (high/medium/low)
         - category breakdowns
         - top drivers (positive and negative)
-        - all intermediate calculations
     """
     if not current_user.organization:
         raise HTTPException(
@@ -246,168 +237,77 @@ async def get_health_score(
             detail="User has no organization",
         )
     
-    # Set default dates if not provided
-    today = datetime.now(timezone.utc).date()
-    if end_date is None:
-        end_date = today
-    if start_date is None:
-        start_date = today - timedelta(days=30)
-    
-    # Validate date range
-    if start_date >= end_date:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="start_date must be before end_date",
-        )
-    
-    if end_date > today:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="end_date cannot be in the future",
-        )
-    
     try:
-        # Create cache service
-        cache_service = CacheService(db)
-        
-        # Create SDK client
-        sdk_client = await create_xero_sdk_client(
-            organization_id=current_user.organization.id,
-            db=db,
+        # Read from database (fast, no Xero calls)
+        stmt = select(CalculatedMetrics).where(
+            CalculatedMetrics.organization_id == current_user.organization.id
         )
+        result = await db.execute(stmt)
+        calc_metrics = result.scalar_one_or_none()
         
-        # Create data fetcher
-        data_fetcher = XeroDataFetcher(sdk_client, cache_service=cache_service, db=db)
-        
-        # Fetch all data (includes extracted data from new Extractors module)
-        financial_data = await data_fetcher.fetch_all_data(
-            organization_id=current_user.organization.id,
-            start_date=start_date,
-            end_date=end_date,
-            force_refresh=force_refresh,
-        )
-        
-        # Commit token updates
-        if data_fetcher.session_manager:
-            await data_fetcher.session_manager.commit_all()
-        
-        # Use new extracted data if available (from Extractors module)
-        extracted = financial_data.get("extracted")
-        if extracted:
-            # Use clean extracted data
-            balance_sheet_totals = extracted.get("balance_sheet", {})
-            pnl_data = extracted.get("pnl", {})
-            trial_balance_pnl = {
-                "revenue": pnl_data.get("revenue"),
-                "cost_of_sales": pnl_data.get("cost_of_sales"),
-                "expenses": pnl_data.get("expenses"),
+        if not calc_metrics or not calc_metrics.health_score_payload:
+            # No health score yet - return empty state with instructions
+            return {
+                "schema_version": "bhs.v1",
+                "generated_at": None,
+                "scorecard": {
+                    "raw_score": 0,
+                    "confidence": "low",
+                    "confidence_cap": 80,
+                    "final_score": 0,
+                    "grade": "D",
+                },
+                "category_scores": {},
+                "subscores": {},
+                "drivers": {"top_positive": [], "top_negative": []},
+                "data_quality": {
+                    "signals": [{
+                        "signal_id": "no_sync",
+                        "severity": "warning",
+                        "message": "No data yet. Please sync your Xero data first."
+                    }],
+                    "warnings": ["No health score calculated yet. Trigger a sync to calculate."],
+                },
+                "message": "Health score not yet calculated. Please trigger a sync.",
             }
-            invoices_receivable = financial_data.get("invoices_receivable", {})
-            invoices_payable = financial_data.get("invoices_payable", {})
-            logger.debug(
-                "Health Score using extracted data: cash=%.2f, AR=%.2f, revenue=%.2f",
-                balance_sheet_totals.get("cash") or 0,
-                balance_sheet_totals.get("accounts_receivable") or 0,
-                trial_balance_pnl.get("revenue") or 0,
-            )
-        else:
-            # Fallback to old structure
-            balance_sheet_totals = financial_data.get("balance_sheet_totals", {})
-            trial_balance_pnl = financial_data.get("trial_balance_pnl", {})
-            invoices_receivable = financial_data.get("invoices_receivable", {})
-            invoices_payable = financial_data.get("invoices_payable", {})
         
-        # Fetch monthly P&L data for historical metrics (C1, C2, A2)
-        monthly_pnl_data = None
-        try:
-            monthly_pnl_raw = await data_fetcher.orchestrator.fetch_monthly_pnl_with_cache(
-                organization_id=current_user.organization.id,
-                num_months=12,
-                force_refresh=force_refresh,
-            )
+        # Return the stored health score
+        health_score = calc_metrics.health_score_payload
+        
+        # Add business info if not present
+        if "business" not in health_score:
+            xero_tenant_id = None
+            if current_user.organization.xero_token:
+                xero_tenant_id = current_user.organization.xero_token.xero_tenant_id
             
-            # Get account map for extraction
-            account_map = financial_data.get("account_type_map", {})
-            
-            # Extract P&L totals from monthly data
-            if monthly_pnl_raw and account_map:
-                monthly_pnl_data = Extractors.extract_monthly_pnl_totals(
-                    monthly_pnl_raw,
-                    account_map,
-                )
-                logger.info(
-                    "Fetched %d months of P&L data for health score",
-                    len(monthly_pnl_data),
-                )
-        except Exception as e:
-            # Non-fatal: continue without historical data
-            logger.warning("Could not fetch monthly P&L data: %s", e)
-            monthly_pnl_data = None
+            health_score["business"] = {
+                "business_id": str(current_user.organization.id),
+                "business_name": current_user.organization.name or "Unknown",
+                "tenant_provider": "xero",
+                "tenant_id": xero_tenant_id,
+                "currency": "AUD",
+            }
         
-        # Calculate Health Score
-        health_score = HealthScoreCalculator.calculate(
-            balance_sheet_totals=balance_sheet_totals,
-            trial_balance_pnl=trial_balance_pnl,
-            invoices_receivable=invoices_receivable,
-            invoices_payable=invoices_payable,
-            monthly_pnl_data=monthly_pnl_data,
-        )
+        # Add calculated_at from the metrics record
+        if "generated_at" not in health_score:
+            health_score["generated_at"] = calc_metrics.calculated_at.isoformat() if calc_metrics.calculated_at else None
         
-        # Add organization and period info
-        xero_tenant_id = None
-        if current_user.organization.xero_token:
-            xero_tenant_id = current_user.organization.xero_token.xero_tenant_id
-        
-        health_score["business"] = {
-            "business_id": str(current_user.organization.id),
-            "business_name": current_user.organization.name or "Unknown",
-            "tenant_provider": "xero",
-            "tenant_id": xero_tenant_id,
-            "currency": "AUD",  # Could be fetched from Xero org settings
-        }
-        # Calculate number of months of P&L data available
-        pnl_months_count = len(monthly_pnl_data) if monthly_pnl_data else 1
-        pnl_start = monthly_pnl_data[-1]["month_key"] if monthly_pnl_data else start_date.isoformat()[:7]
-        pnl_end = monthly_pnl_data[0]["month_key"] if monthly_pnl_data else end_date.isoformat()[:7]
-        
-        health_score["periods"] = {
-            "pnl_monthly": {
-                "start_date": f"{pnl_start}-01" if "-" in str(pnl_start) and len(str(pnl_start)) == 7 else start_date.isoformat(),
-                "end_date": end_date.isoformat(),
-                "months": pnl_months_count,
-            },
-            "rolling_3m": {
-                "end_date": end_date.isoformat(),
-            },
-            "rolling_6m": {
-                "end_date": end_date.isoformat(),
-            },
-            "balance_sheet_asof": end_date.isoformat(),
-        }
-        
-        logger.info(
-            "Health Score calculated for org %s: score=%s, grade=%s, confidence=%s",
+        logger.debug(
+            "Health Score returned for org %s: score=%s, grade=%s",
             current_user.organization.id,
-            health_score["scorecard"]["final_score"],
-            health_score["scorecard"]["grade"],
-            health_score["scorecard"]["confidence"],
+            health_score.get("scorecard", {}).get("final_score"),
+            health_score.get("scorecard", {}).get("grade"),
         )
         
         return health_score
         
-    except XeroSDKClientError as e:
-        logger.error("Xero SDK error while calculating health score: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Unable to fetch financial data from Xero",
-        )
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error calculating health score: %s", e)
+        logger.error("Error retrieving health score: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to calculate health score",
+            detail="Failed to retrieve health score",
         )
 
 

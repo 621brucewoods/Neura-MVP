@@ -156,14 +156,16 @@ class ProfitLossFetcher(BaseFetcher):
         num_months: int = 12,
         reference_date: Optional[date] = None,
         cached_months: Optional[set[str]] = None,
+        batch_size: int = 3,
     ) -> list[dict[str, Any]]:
         """
-        Fetch P&L for multiple months in parallel.
+        Fetch P&L for multiple months in batches to avoid rate limits.
         
         Args:
             num_months: Number of months to fetch (default 12)
             reference_date: Reference date (defaults to today)
             cached_months: Set of month_keys (e.g., {"2025-01", "2025-02"}) to skip
+            batch_size: Number of concurrent requests per batch (default 3)
             
         Returns:
             List of monthly P&L data, sorted newest to oldest
@@ -177,7 +179,7 @@ class ProfitLossFetcher(BaseFetcher):
         last_month = today.replace(day=1) - timedelta(days=1)
         last_month_key = f"{last_month.year}-{last_month.month:02d}"
         
-        tasks = []
+        months_needed = []
         for year, month in months_to_fetch:
             month_key = f"{year}-{month:02d}"
             
@@ -186,23 +188,33 @@ class ProfitLossFetcher(BaseFetcher):
                 logger.debug("Skipping cached month: %s", month_key)
                 continue
             
-            tasks.append(self.fetch_month(year, month))
+            months_needed.append((year, month))
         
-        if not tasks:
+        if not months_needed:
             logger.info("All months cached, no fetch needed")
             return []
         
-        # Fetch in parallel
-        logger.info("Fetching %d months of P&L data", len(tasks))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Process results
+        # Fetch in batches to avoid rate limits
+        logger.info("Fetching %d months of P&L data in batches of %d", len(months_needed), batch_size)
         monthly_data = []
-        for result in results:
-            if isinstance(result, Exception):
-                logger.error("Error fetching monthly P&L: %s", result)
-                continue
-            monthly_data.append(result)
+        
+        for i in range(0, len(months_needed), batch_size):
+            batch = months_needed[i:i + batch_size]
+            batch_tasks = [self.fetch_month(year, month) for year, month in batch]
+            
+            # Fetch batch in parallel
+            results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+            
+            # Process batch results
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error("Error fetching monthly P&L: %s", result)
+                    continue
+                monthly_data.append(result)
+            
+            # Small delay between batches to be nice to the API
+            if i + batch_size < len(months_needed):
+                await asyncio.sleep(0.3)
         
         # Sort by month (newest first)
         monthly_data.sort(key=lambda x: x["month_key"], reverse=True)

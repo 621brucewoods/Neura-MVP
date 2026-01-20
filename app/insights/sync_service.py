@@ -16,9 +16,11 @@ from app.models.organization import Organization, SyncStatus, SyncStep
 from app.integrations.xero.data_fetcher import XeroDataFetcher
 from app.integrations.xero.sdk_client import create_xero_sdk_client
 from app.integrations.xero.cache_service import CacheService
+from app.integrations.xero.extractors import Extractors
 from app.insights.service import InsightsService
 from app.insights.data_summarizer import DataSummarizer
 from app.insights.insight_generator import InsightGenerator
+from app.insights.health_score_calculator import HealthScoreCalculator
 from app.models.insight import Insight as InsightModel
 from app.models.calculated_metrics import CalculatedMetrics
 from app.insights.schemas import (
@@ -104,6 +106,69 @@ class SyncService:
             metrics = InsightsService.calculate_all_insights(financial_data)
             raw_data_summary = DataSummarizer.summarize(financial_data, start_date, end_date, data_fetcher)
 
+            # 4.5 Fetch Monthly P&L and Calculate Health Score
+            # This uses the same fetched data + monthly historical P&L
+            health_score_payload = None
+            try:
+                # Fetch monthly P&L (uses batched fetching to avoid rate limits)
+                monthly_pnl_raw = await data_fetcher.orchestrator.fetch_monthly_pnl_with_cache(
+                    organization_id=self.organization_id,
+                    num_months=12,
+                    force_refresh=force_refresh,
+                )
+                
+                # Extract P&L totals from monthly data
+                account_map = financial_data.get("account_type_map", {})
+                monthly_pnl_data = None
+                if monthly_pnl_raw and account_map:
+                    monthly_pnl_data = Extractors.extract_monthly_pnl_totals(
+                        monthly_pnl_raw,
+                        account_map,
+                    )
+                    logger.info(f"Extracted {len(monthly_pnl_data)} months of P&L for health score")
+                
+                # Prepare data for Health Score calculation
+                extracted = financial_data.get("extracted", {})
+                balance_sheet_totals = extracted.get("balance_sheet", {})
+                pnl_data = extracted.get("pnl", {})
+                trial_balance_pnl = {
+                    "revenue": pnl_data.get("revenue"),
+                    "cost_of_sales": pnl_data.get("cost_of_sales"),
+                    "expenses": pnl_data.get("expenses"),
+                }
+                invoices_receivable = financial_data.get("invoices_receivable", {})
+                invoices_payable = financial_data.get("invoices_payable", {})
+                
+                # Calculate Health Score
+                health_score = HealthScoreCalculator.calculate(
+                    balance_sheet_totals=balance_sheet_totals,
+                    trial_balance_pnl=trial_balance_pnl,
+                    invoices_receivable=invoices_receivable,
+                    invoices_payable=invoices_payable,
+                    monthly_pnl_data=monthly_pnl_data,
+                )
+                
+                # Add metadata
+                health_score["generated_at"] = datetime.now(timezone.utc).isoformat()
+                health_score["periods"] = {
+                    "pnl_monthly": {
+                        "start_date": start_date.isoformat(),
+                        "end_date": end_date.isoformat(),
+                        "months": len(monthly_pnl_data) if monthly_pnl_data else 1,
+                    },
+                    "balance_sheet_asof": end_date.isoformat(),
+                }
+                
+                health_score_payload = health_score
+                logger.info(
+                    f"Health Score calculated: score={health_score['scorecard']['final_score']}, "
+                    f"grade={health_score['scorecard']['grade']}, "
+                    f"confidence={health_score['scorecard']['confidence']}"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to calculate health score during sync: {e}")
+                health_score_payload = None
+
             # Persist Metrics Snapshot
             # This allows the dashboard to load without re-fetching Xero data
             generated_at = datetime.now(timezone.utc)
@@ -135,18 +200,16 @@ class SyncService:
             if calc_metrics:
                 # Update existing
                 calc_metrics.metrics_payload = metrics_payload
+                calc_metrics.health_score_payload = health_score_payload  # NEW: Save health score
                 calc_metrics.calculated_at = generated_at
                 calc_metrics.data_period_start = start_date
                 calc_metrics.data_period_end = end_date
-                
-                # Also update the individual columns for queryability (optional but good practice)
-                # calc_metrics.runway_months = metrics["cash_runway"].runway_months
-                # calc_metrics.total_cash = metrics["cash_runway"].current_cash
             else:
                 # Create new
                 calc_metrics = CalculatedMetrics(
                     organization_id=self.organization_id,
                     metrics_payload=metrics_payload,
+                    health_score_payload=health_score_payload,  # NEW: Save health score
                     calculated_at=generated_at,
                     data_period_start=start_date,
                     data_period_end=end_date,
