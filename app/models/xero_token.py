@@ -72,6 +72,12 @@ class XeroToken(Base, UUIDMixin, TimestampMixin):
         comment="Xero's internal organization identifier",
     )
     
+    xero_org_name: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="Xero organization/company name",
+    )
+    
     # OAuth tokens
     access_token: Mapped[str] = mapped_column(
         Text,

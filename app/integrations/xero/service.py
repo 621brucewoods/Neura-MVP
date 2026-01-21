@@ -246,6 +246,7 @@ class XeroService:
         organization_id: UUID,
         token_response: dict,
         xero_tenant_id: str,
+        xero_org_name: str | None = None,
     ) -> XeroToken:
         """
         Save tokens received from OAuth callback.
@@ -256,6 +257,7 @@ class XeroService:
             organization_id: Organization UUID
             token_response: Raw response from Xero token endpoint
             xero_tenant_id: Xero tenant ID from connections endpoint
+            xero_org_name: Xero organization name (optional)
             
         Returns:
             Created or updated XeroToken
@@ -283,10 +285,16 @@ class XeroService:
         if existing_token:
             # Update existing (reconnecting)
             existing_token.xero_tenant_id = xero_tenant_id
+            if xero_org_name:
+                existing_token.xero_org_name = xero_org_name
             return await self.update_token(existing_token, token_data)
         else:
             # Create new
-            return await self.create_token(organization_id, token_data)
+            token = await self.create_token(organization_id, token_data)
+            if xero_org_name:
+                token.xero_org_name = xero_org_name
+                await self.db.commit()
+            return token
     
     async def get_connection_status(self, organization_id: UUID) -> XeroConnectionStatus:
         """

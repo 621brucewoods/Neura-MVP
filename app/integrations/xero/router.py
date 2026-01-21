@@ -150,6 +150,7 @@ async def xero_callback(
             organization_id=organization.id,
             token_response=token_response,
             xero_tenant_id=xero_tenant_id,
+            xero_org_name=xero_org_name,
         )
         
         # Redirect to settings page after successful connect
