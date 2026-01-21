@@ -49,3 +49,20 @@ class AdminDashboardResponse(BaseModel):
     
     stats: AdminDashboardStats = Field(..., description="Platform statistics")
     organizations: list[OrganizationSummary] = Field(..., description="All organizations")
+
+
+class UserSummary(BaseModel):
+    """User summary for admin view."""
+    
+    id: str = Field(..., description="User UUID")
+    email: str = Field(..., description="User email")
+    role: str = Field(..., description="User role (user or admin)")
+    organization_name: Optional[str] = Field(None, description="Organization name")
+    created_at: str = Field(..., description="ISO timestamp of creation")
+
+
+class UserListResponse(BaseModel):
+    """Response for listing users."""
+    
+    total: int = Field(..., description="Total number of users")
+    users: list[UserSummary] = Field(..., description="List of users")

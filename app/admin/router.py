@@ -6,7 +6,9 @@ API endpoints for platform administration.
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -14,11 +16,14 @@ from sqlalchemy.orm import selectinload
 from app.auth.dependencies import AdminUser
 from app.database.connection import get_async_session
 from app.models.organization import Organization, SyncStatus
+from app.models.user import User, UserRole
 from app.admin.schemas import (
     AdminDashboardResponse,
     AdminDashboardStats,
     OrganizationListResponse,
     OrganizationSummary,
+    UserListResponse,
+    UserSummary,
 )
 
 logger = logging.getLogger(__name__)
@@ -161,3 +166,64 @@ async def list_organizations(
         total=total,
         organizations=org_summaries,
     )
+
+
+@router.get("/users", response_model=UserListResponse, summary="List all users")
+async def list_users(
+    admin_user: AdminUser,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_async_session),
+) -> UserListResponse:
+    """Get paginated list of all users with their roles."""
+    # Get total
+    count_result = await db.execute(select(func.count()).select_from(User))
+    total = count_result.scalar() or 0
+    
+    # Get users
+    stmt = select(User).options(selectinload(User.organization)).order_by(User.created_at.desc()).limit(limit).offset(offset)
+    result = await db.execute(stmt)
+    users = result.scalars().all()
+    
+    return UserListResponse(
+        total=total,
+        users=[
+            UserSummary(
+                id=str(u.id),
+                email=u.email,
+                role=u.role.value if u.role else "user",
+                organization_name=u.organization.name if u.organization else None,
+                created_at=u.created_at.isoformat() if u.created_at else "",
+            )
+            for u in users
+        ]
+    )
+
+
+@router.post("/users/{user_id}/role", summary="Update user role")
+async def update_user_role(
+    user_id: UUID,
+    admin_user: AdminUser,
+    role: str = Query(..., description="New role: 'admin' or 'user'"),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Promote or demote a user."""
+    if role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="Role must be 'admin' or 'user'")
+    
+    # Prevent self-demotion
+    if user_id == admin_user.id and role == "user":
+        raise HTTPException(status_code=400, detail="Cannot demote yourself")
+    
+    stmt = select(User).where(User.id == user_id)
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user.role = UserRole.ADMIN if role == "admin" else UserRole.USER
+    await db.commit()
+    
+    logger.info(f"Admin {admin_user.email} changed {user.email} role to {role}")
+    return {"success": True, "message": f"User role updated to {role}"}
