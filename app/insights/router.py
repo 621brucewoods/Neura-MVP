@@ -108,7 +108,7 @@ async def get_insights(
         # Calculate total pages
         total_pages = (total + limit - 1) // limit if total > 0 else 0
         
-        # Format for response
+        # Format for response (already sorted by generated_at desc from DB)
         insights_with_engagement = []
         for saved_insight in saved_insights:
             insights_with_engagement.append({
@@ -126,24 +126,6 @@ async def get_insights(
                 "is_acknowledged": saved_insight.is_acknowledged,
                 "is_marked_done": saved_insight.is_marked_done,
             })
-
-        # In-memory ranking: severity > confidence > generated_at (desc)
-        def _sev_weight(v: Optional[str]) -> int:
-            m = {"high": 3, "medium": 2, "low": 1}
-            return m.get((v or "").lower(), 0)
-
-        def _conf_weight(v: Optional[str]) -> int:
-            m = {"high": 3, "medium": 2, "low": 1}
-            return m.get((v or "").lower(), 0)
-
-        insights_with_engagement.sort(
-            key=lambda x: (
-                _sev_weight(x.get("severity")),
-                _conf_weight(x.get("confidence_level")),
-                x.get("generated_at", ""),
-            ),
-            reverse=True,
-        )
         
         
         return InsightsResponse(
