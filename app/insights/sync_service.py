@@ -165,6 +165,56 @@ class SyncService:
                     },
                 }
                 
+                # Generate AI descriptive text (during sync, not fetch)
+                try:
+                    from app.insights.health_score_ai_generator import HealthScoreAIGenerator
+                    
+                    # Generate 2 hardcoded items for Category A
+                    key_metrics = health_score.get("key_metrics", {})
+                    cash = abs(key_metrics.get("current_cash", 0))
+                    burn = abs(key_metrics.get("monthly_burn", 0))
+                    period = key_metrics.get("period_label", "the past 90 days").lower()
+                    hardcoded_a = [
+                        f"Current cash balance of ${cash:,.0f} across all connected accounts",
+                        f"Average monthly outflows of ${burn:,.0f} over {period}"
+                    ]
+                    
+                    # Run AI generation in executor (blocking call)
+                    import asyncio
+                    loop = asyncio.get_running_loop()
+                    
+                    def _generate_text():
+                        generator = HealthScoreAIGenerator()
+                        return generator.generate_descriptive_text(
+                            health_score=health_score,
+                            key_metrics=key_metrics,
+                            raw_data_summary=raw_data_summary,
+                            calculated_metrics=metrics,
+                        )
+                    
+                    ai_text = await loop.run_in_executor(None, _generate_text)
+                    
+                    # Merge AI-generated text into health score
+                    if ai_text.get("category_metrics"):
+                        for category_id, category_metrics_list in ai_text["category_metrics"].items():
+                            if category_id in health_score["category_scores"]:
+                                # Prepend hardcoded items for Category A
+                                if category_id == "A":
+                                    health_score["category_scores"][category_id]["metrics"] = hardcoded_a + category_metrics_list
+                                else:
+                                    health_score["category_scores"][category_id]["metrics"] = category_metrics_list
+                    else:
+                        health_score["category_scores"]["A"]["metrics"] = hardcoded_a
+                    
+                    if ai_text.get("why_this_matters"):
+                        health_score["why_this_matters"] = ai_text["why_this_matters"]
+                    
+                    if ai_text.get("assumptions"):
+                        health_score["assumptions"] = ai_text["assumptions"]
+                except Exception as e:
+                    logger.warning(f"Failed to generate AI descriptive text for health score: {e}")
+                    health_score["category_scores"]["A"]["metrics"] = hardcoded_a
+                
                 health_score_payload = health_score
                 logger.info(
                     f"Health Score calculated: score={health_score['scorecard']['final_score']}, "

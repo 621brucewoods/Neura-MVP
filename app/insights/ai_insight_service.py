@@ -344,6 +344,204 @@ All fields are required, but supporting_numbers can be [] and data_notes can be 
         """
         return int(len(text) * TOKENS_PER_CHAR)
     
+    def _generate_health_score_text(
+        self,
+        health_score: dict[str, Any],
+        key_metrics: dict[str, Any],
+        raw_data_summary: dict[str, Any],
+        calculated_metrics: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Generate descriptive text for health score using OpenAI.
+        
+        Args:
+            health_score: Complete health score dictionary
+            key_metrics: Key metrics (current_cash, monthly_burn, etc.)
+            raw_data_summary: Summarized raw financial data
+        
+        Returns:
+            Dictionary with category_metrics, why_this_matters, and assumptions
+        """
+        prompt = self._build_health_score_prompt(health_score, key_metrics, raw_data_summary, calculated_metrics)
+        schema = self._get_health_score_json_schema()
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": self._get_health_score_system_prompt(),
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "health_score_text",
+                        "strict": True,
+                        "schema": schema,
+                    },
+                },
+                temperature=0.1,
+            )
+            
+            content = response.choices[0].message.content
+            if not content:
+                raise ValueError("Empty response from OpenAI")
+            
+            parsed = json.loads(content)
+            return parsed
+            
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse OpenAI JSON response: %s", e)
+            raise ValueError(f"Invalid JSON response from OpenAI: {e}") from e
+        except Exception as e:
+            logger.error("OpenAI API error: %s", e)
+            raise
+    
+    def _get_health_score_system_prompt(self) -> str:
+        """Get system prompt for health score text generation."""
+        return """You are a financial advisor helping small business owners understand their business health score.
+
+Your role:
+- Generate clear, descriptive text in plain English
+- Use a calm, confident tone (never panic or shame)
+- Focus on what the data shows, why it matters, and what assumptions were made
+- Be specific with numbers and timeframes
+- Match the exact format required by the UI
+
+Tone guidelines:
+- ✅ "Current cash balance of $49,600 across all connected accounts"
+- ✅ "Average monthly outflows of $12,400 over the past 90 days"
+- ❌ "Your cash is low" or "You're spending too much"
+
+Data handling rules:
+- Use the exact numbers provided in key_metrics and health_score
+- Never fabricate or estimate numbers not provided
+- If data is missing, note it in assumptions
+- Be precise with timeframes (e.g., "90 days" not "3 months" unless specified)
+
+Output requirements:
+- Category metrics: 2-3 descriptive sentences per category (A, B, C, D, E)
+- Why this matters: One paragraph explaining the current situation contextually
+- Assumptions: List of key assumptions made in the calculation"""
+    
+    def _build_health_score_prompt(
+        self,
+        health_score: dict[str, Any],
+        key_metrics: dict[str, Any],
+        raw_data_summary: dict[str, Any],
+        calculated_metrics: dict[str, Any] | None = None,
+    ) -> str:
+        """Build user prompt for health score text generation."""
+        scorecard = health_score.get("scorecard", {})
+        runway_months = key_metrics.get("runway_months")
+        current_cash = key_metrics.get("current_cash", 0)
+        monthly_burn = key_metrics.get("monthly_burn", 0)
+        period_label = key_metrics.get("period_label", "Last 90 days")
+        
+        return f"""Generate descriptive text for a Business Health Score of {scorecard.get('final_score', 0)}/100 (Grade: {scorecard.get('grade', 'D')}).
+
+KEY METRICS:
+- Current cash: ${current_cash:,.0f}
+- Monthly burn: ${monthly_burn:,.0f}
+- Runway: {runway_months} months (if applicable)
+- Data period: {period_label}
+
+HEALTH SCORE DATA:
+{json.dumps(health_score, indent=2)}
+
+RAW DATA SUMMARY (for context):
+{json.dumps(raw_data_summary, indent=2)}
+
+Generate:
+
+1. CATEGORY METRICS: For each category, create descriptive sentences:
+   - Category A: Generate ONLY 2 items about burn rate stability, trends, or runway context (DO NOT mention current cash or monthly outflows - those are already provided)
+   - Categories B-E: 2-3 items each
+   - Use exact numbers from the data
+   - Be specific and factual
+
+2. WHY THIS MATTERS: One paragraph (3-4 sentences) that:
+   - Explains the current situation contextually
+   - Uses the runway months and cash position
+   - Provides appropriate context based on the score
+   - Example: "With 4 months of runway, your cash position is stable for the near term. This gives you time to plan without immediate pressure. However, it's worth monitoring closely if you're expecting any large expenses or if revenue becomes uncertain."
+
+3. ASSUMPTIONS: List 2-4 key assumptions made in the calculation:
+   - Data quality notes
+   - Calculation assumptions
+   - Example: "Cash balance reference point: Today", "Calculation based on 90 days of transaction data"
+
+Return as JSON matching the required schema."""
+    
+    def _get_health_score_json_schema(self) -> dict[str, Any]:
+        """Get JSON schema for health score descriptive text."""
+        return {
+            "type": "object",
+            "properties": {
+                "category_metrics": {
+                    "type": "object",
+                    "properties": {
+                        "A": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "description": "2 items about burn rate stability/trends ",
+                        },
+                        "B": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 3,
+                            "description": "Descriptive sentences for Profitability & Efficiency category",
+                        },
+                        "C": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": 3,
+                            "description": "Descriptive sentences for Revenue Quality & Momentum category",
+                        },
+                        "D": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 4,
+                            "description": "Descriptive sentences for Working Capital & Liquidity category",
+                        },
+                        "E": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": 3,
+                            "description": "Descriptive sentences for Compliance & Data Confidence category",
+                        },
+                    },
+                    "required": ["A", "B", "C", "D", "E"],
+                    "additionalProperties": False,
+                },
+                "why_this_matters": {
+                    "type": "string",
+                    "description": "One paragraph explaining why the current situation matters contextually",
+                },
+                "assumptions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 4,
+                    "description": "Key assumptions made in the calculation",
+                },
+            },
+            "required": ["category_metrics", "why_this_matters", "assumptions"],
+            "additionalProperties": False,
+        }
+    
     def _truncate_summary_if_needed(self, summary: dict[str, Any]) -> dict[str, Any]:
         """
         Truncate raw data summary if it's too large.

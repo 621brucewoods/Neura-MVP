@@ -1004,6 +1004,24 @@ class HealthScoreCalculator:
         drivers_positive.sort(key=lambda d: d.impact_points, reverse=True)
         drivers_negative.sort(key=lambda d: d.impact_points)
         
+        # Calculate key_metrics from intermediates
+        # Use monthly_burn if calculated, otherwise derive from avg_monthly_expenses
+        calculated_monthly_burn = monthly_burn
+        if calculated_monthly_burn is None and avg_monthly_expenses is not None and avg_monthly_revenue is not None:
+            calculated_monthly_burn = max(0, avg_monthly_expenses - avg_monthly_revenue)
+        
+        # Calculate data period from monthly P&L data
+        months_fetched = len(monthly_pnl)
+        data_period_days = int(months_fetched * 30.44) if months_fetched > 0 else 90
+        
+        # Generate period label
+        if months_fetched == 0:
+            period_label = "Last 90 days"
+        elif months_fetched == 1:
+            period_label = "Last month"
+        else:
+            period_label = f"Last {months_fetched} months"
+        
         return {
             "schema_version": "bhs.v1",
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1014,41 +1032,48 @@ class HealthScoreCalculator:
                 "final_score": round(final_score, 1),
                 "grade": grade.value,
             },
+            "key_metrics": {
+                "current_cash": cash if cash is not None else 0.0,
+                "monthly_burn": calculated_monthly_burn if calculated_monthly_burn is not None else 0.0,
+                "runway_months": runway_months if runway_months != 999 else None,
+                "data_period_days": data_period_days,
+                "period_label": period_label,
+            },
             "category_scores": {
                 "A": {
                     "category_id": "A",
                     "name": "Cash & Runway",
                     "max_points": 30,
                     "points_awarded": round(category_a_points, 1),
-                    "metrics": ["A1", "A2", "A3"],
+                    "metrics": [],  # Will be populated by AI during sync
                 },
                 "B": {
                     "category_id": "B",
                     "name": "Profitability & Efficiency",
                     "max_points": 25,
                     "points_awarded": round(category_b_points, 1),
-                    "metrics": ["B1", "B2", "B3"],
+                    "metrics": [],  # Will be populated by AI during sync
                 },
                 "C": {
                     "category_id": "C",
                     "name": "Revenue Quality & Momentum",
                     "max_points": 15,
                     "points_awarded": round(category_c_points, 1),
-                    "metrics": ["C1", "C2"],
+                    "metrics": [],  # Will be populated by AI during sync
                 },
                 "D": {
                     "category_id": "D",
                     "name": "Working Capital & Liquidity",
                     "max_points": 20,
                     "points_awarded": round(category_d_points, 1),
-                    "metrics": ["D1", "D2", "D3", "D4"],
+                    "metrics": [],  # Will be populated by AI during sync
                 },
                 "E": {
                     "category_id": "E",
                     "name": "Compliance & Data Confidence",
                     "max_points": 10,
                     "points_awarded": round(category_e_points, 1),
-                    "metrics": ["E1", "E2", "E3"],
+                    "metrics": [],  # Will be populated by AI during sync
                 },
             },
             "subscores": {

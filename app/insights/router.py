@@ -3,6 +3,7 @@ Insights Router
 API endpoints for financial insights and calculations.
 """
 
+import copy
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -246,7 +247,11 @@ async def get_health_score(
             }
         
         # Return the stored health score
-        health_score = calc_metrics.health_score_payload
+        # Use deepcopy to ensure we get a proper dict copy (JSONB might not support .copy())
+        if calc_metrics.health_score_payload:
+            health_score = copy.deepcopy(calc_metrics.health_score_payload)
+        else:
+            health_score = {}
         
         # Add business info if not present
         if "business" not in health_score:
