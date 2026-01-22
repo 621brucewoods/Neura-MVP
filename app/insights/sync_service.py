@@ -171,8 +171,8 @@ class SyncService:
                     
                     # Generate 2 hardcoded items for Category A
                     key_metrics = health_score.get("key_metrics", {})
-                    cash = abs(key_metrics.get("current_cash", 0))
-                    burn = abs(key_metrics.get("monthly_burn", 0))
+                    cash = key_metrics.get("current_cash", 0)
+                    burn = key_metrics.get("monthly_burn", 0)
                     period = key_metrics.get("period_label", "the past 90 days").lower()
                     hardcoded_a = [
                         f"Current cash balance of ${cash:,.0f} across all connected accounts",
