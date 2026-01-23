@@ -11,6 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.auth.dependencies import get_current_user, get_admin_user
 from app.database.connection import get_async_session
@@ -175,8 +176,10 @@ async def get_all_feedback(
     Get all feedback with filtering and pagination (admin only).
     """
     try:
-        # Build query
-        stmt = select(InsightFeedback)
+        # Build query with organization join
+        stmt = select(InsightFeedback).options(
+            selectinload(InsightFeedback.organization)
+        )
         
         # Apply filters
         if insight_type:
@@ -212,6 +215,7 @@ async def get_all_feedback(
                 comment=f.comment,
                 user_id=str(f.user_id),
                 organization_id=str(f.organization_id),
+                organization_name=f.organization.name if f.organization else "Unknown",
                 created_at=f.created_at.isoformat(),
             )
             for f in feedback_items

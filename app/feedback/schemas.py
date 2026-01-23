@@ -56,6 +56,7 @@ class FeedbackItem(BaseModel):
     comment: Optional[str] = Field(None, description="User comment")
     user_id: str = Field(..., description="User ID who provided feedback")
     organization_id: str = Field(..., description="Organization ID")
+    organization_name: str = Field(..., description="Organization name")
     created_at: str = Field(..., description="ISO timestamp")
 
 
